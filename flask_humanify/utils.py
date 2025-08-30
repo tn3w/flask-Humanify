@@ -11,7 +11,7 @@ from typing import List, Optional
 from urllib.parse import urlparse
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from flask import Request
+from flask import Request, g
 from netaddr import AddrFormatError, IPAddress
 import cv2
 import numpy as np
@@ -132,6 +132,49 @@ def generate_clearance_token(user_hash: str, key: bytes) -> str:
     data = f"{nonce}{timestamp}{user_hash}"
     signature = generate_signature(data, key)
     return f"{data}{signature}"
+
+
+def generate_client_id_token(secret_key: bytes, client_id: str) -> str:
+    """Generate a signed client ID token."""
+    h = hmac.new(secret_key, client_id.encode(), hashlib.sha256)
+    return f"{client_id}:{h.hexdigest()}"
+
+
+def verify_client_id_token(secret_key, token: str) -> Optional[str]:
+    """Verify a signed client ID token and return the client ID if valid."""
+    if not token or ":" not in token:
+        return None
+    client_id, signature = token.rsplit(":", 1)
+    expected = hmac.new(secret_key, client_id.encode(), hashlib.sha256).hexdigest()
+    if hmac.compare_digest(signature, expected):
+        return client_id
+    return None
+
+
+def get_or_create_client_id(
+    request: Request,
+    client_ip: Optional[str],
+    secret_key: Optional[bytes],
+    use_client_id: bool = False,
+) -> str:
+    """Get or create a client identifier."""
+    if not use_client_id:
+        if not client_ip:
+            client_ip = "127.0.0.1"
+        return hashlib.sha256(client_ip.encode()).hexdigest()
+
+    if not secret_key:
+        raise ValueError("Secret key is required for client ID.")
+
+    client_id_token = request.cookies.get("client_id")
+    if client_id_token:
+        verified_id = verify_client_id_token(secret_key, client_id_token)
+        if verified_id:
+            return verified_id
+
+    new_id = secrets.token_hex(16)
+    g.humanify_new_client_id = generate_client_id_token(secret_key, new_id)
+    return new_id
 
 
 def validate_clearance_token(

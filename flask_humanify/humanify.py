@@ -3,7 +3,6 @@ import logging
 import random
 from typing import List, Optional, Union, Dict, Any, Pattern
 import re
-import hashlib
 import fnmatch
 
 from werkzeug.wrappers import Response
@@ -21,6 +20,7 @@ from .memory_server import MemoryClient, ensure_server_running
 from .utils import (
     get_client_ip,
     get_return_url,
+    get_or_create_client_id,
     validate_clearance_token,
     generate_user_hash,
     manipulate_image_bytes,
@@ -135,11 +135,13 @@ class Humanify:
         challenge_type: str = "one_click",
         image_dataset: Optional[str] = "ai_dogs",
         audio_dataset: Optional[str] = None,
+        use_client_id: bool = False,
     ):
         self.app = app
         self.challenge_type = challenge_type
         self.image_dataset = image_dataset
         self.audio_dataset = audio_dataset
+        self.use_client_id = use_client_id
         if app is not None:
             self.init_app(app)
 
@@ -148,6 +150,7 @@ class Humanify:
         Initialize the Humanify extension.
         """
         self.app = app
+        self.app.config.setdefault("HUMANIFY_USE_CLIENT_ID", self.use_client_id)
 
         ensure_server_running(
             image_dataset=self.image_dataset,
@@ -156,6 +159,8 @@ class Humanify:
         self.memory_client = MemoryClient()
         self.memory_client.connect()
         self._secret_key = self.memory_client.get_secret_key()
+
+        self.app.config.setdefault("HUMANIFY_SECRET_KEY", self._secret_key)
 
         self.blueprint = Blueprint(
             "humanify", __name__, template_folder="templates", static_folder=None
@@ -311,6 +316,23 @@ class Humanify:
                 if action == "deny_access":
                     return self.deny_access()
 
+        if self.use_client_id:
+
+            @self.app.after_request
+            def after_request(response):
+                """
+                After request hook to set client ID cookie if needed.
+                """
+                if hasattr(g, "humanify_new_client_id"):
+                    response.set_cookie(
+                        "client_id",
+                        g.humanify_new_client_id,
+                        max_age=14400,
+                        httponly=True,
+                        samesite="Strict",
+                    )
+                return response
+
     def _compile_patterns(self, patterns):
         """
         Compile a list of patterns into regex patterns.
@@ -454,9 +476,12 @@ class Humanify:
         )
 
     def _check_attempt_limit(self) -> Optional[Response]:
-        """Check if the IP has reached the attempt limit and return deny_access response if true."""
-        ip_hash = hashlib.sha256((self.client_ip or "127.0.0.1").encode()).hexdigest()
-        if self.memory_client.is_attempt_limit_reached(ip_hash):
+        """Check if client has reached attempt limit, return deny_access response if true."""
+        if self.memory_client.is_attempt_limit_reached(
+            get_or_create_client_id(
+                request, self.client_ip, self._secret_key, self.use_client_id
+            )
+        ):
             return self.deny_access()
         return None
 
@@ -599,8 +624,11 @@ class Humanify:
         if self.has_valid_clearance_token:
             return redirect(return_url)
 
-        ip_hash = hashlib.sha256((self.client_ip or "127.0.0.1").encode()).hexdigest()
-        failed_attempts = self.memory_client.record_failed_attempt(ip_hash)
+        failed_attempts = self.memory_client.record_failed_attempt(
+            get_or_create_client_id(
+                request, self.client_ip, self._secret_key, self.use_client_id
+            )
+        )
         if failed_attempts >= 3:
             return self.deny_access()
 
