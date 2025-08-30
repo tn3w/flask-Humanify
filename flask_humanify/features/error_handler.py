@@ -192,7 +192,7 @@ class ErrorHandler:
     def handle_error(self, error: Exception) -> Tuple[str, int]:
         """Render exception page with appropriate error information."""
         code = getattr(error, "code", type(error).__name__)
-        if code.isdigit():
+        if isinstance(code, str) and code.isdigit():
             code = int(code)
 
         info = {}

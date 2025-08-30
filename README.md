@@ -6,7 +6,7 @@
 
 ```python
 from flask import Flask
-from flask_Humanify import Humanify
+from flask_humanify import Humanify
 
 app = Flask(__name__)
 humanify = Humanify(app, challenge_type="one_click", image_dataset="ai_dogs")
