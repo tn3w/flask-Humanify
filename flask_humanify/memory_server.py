@@ -555,7 +555,8 @@ class MemoryClient:
         """Connect to the memory server."""
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(10.0)
+            self.socket.settimeout(30.0)
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.socket.connect((self.host, self.port))
             return True
         except (ConnectionRefusedError, OSError) as e:
@@ -569,18 +570,20 @@ class MemoryClient:
 
         try:
             if self.socket:
-                clean_command = command.split('\n')[0].strip()
+                clean_command = command.replace("\n", " ").strip()
                 self.socket.send(f"{clean_command}\n".encode("utf-8"))
 
                 response_bytes = b""
+                buf_size = 4096
                 while True:
                     try:
-                        chunk = self.socket.recv(1)
+                        chunk = self.socket.recv(buf_size)
                         if not chunk:
                             break
-                        if chunk == b"\n":
-                            break
                         response_bytes += chunk
+                        if b"\n" in chunk:
+                            response_bytes = response_bytes.split(b"\n")[0]
+                            break
                     except socket.timeout:
                         break
 
@@ -683,14 +686,28 @@ class MemoryClient:
 
                 images = []
                 for _ in range(response.get("num_images", 0)):
-                    size = int.from_bytes(self.socket.recv(4), "big")
-                    img_data = b""
-                    while len(img_data) < size:
-                        chunk = self.socket.recv(min(size - len(img_data), 4096))
+                    size_bytes = self.socket.recv(4)
+                    if len(size_bytes) != 4:
+                        raise ConnectionError("Failed to read image size")
+                    size = int.from_bytes(size_bytes, "big")
+
+                    img_data = bytearray()
+                    remaining = size
+                    chunk_size = 32768
+
+                    while remaining > 0:
+                        chunk = self.socket.recv(min(remaining, chunk_size))
                         if not chunk:
                             break
-                        img_data += chunk
-                    images.append(img_data)
+                        img_data.extend(chunk)
+                        remaining -= len(chunk)
+
+                    if len(img_data) == size:
+                        images.append(bytes(img_data))
+                    else:
+                        raise ConnectionError(
+                            f"Incomplete image data: {len(img_data)} != {size}"
+                        )
 
                 return (
                     images,
