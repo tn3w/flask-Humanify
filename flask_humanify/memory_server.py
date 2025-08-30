@@ -210,15 +210,19 @@ class MemoryServer:
     ) -> bool:
         """Load captcha datasets into memory."""
         try:
-            if (
-                self.current_image_dataset == image_dataset
-                and self.current_audio_dataset == audio_dataset
-                and (self.captcha_image_data or self.captcha_audio_data)
-            ):
-                return True
+            with self._lock:
+                if (
+                    self.current_image_dataset == image_dataset
+                    and self.current_audio_dataset == audio_dataset
+                    and (self.captcha_image_data or self.captcha_audio_data)
+                ):
+                    return True
 
-            self.current_image_dataset = image_dataset
-            self.current_audio_dataset = audio_dataset
+                temp_image_data = {}
+                temp_audio_data = {}
+
+                self.current_image_dataset = image_dataset
+                self.current_audio_dataset = audio_dataset
 
             if image_dataset in IMAGES_CAPTCHA_DATASETS:
                 dataset_url = IMAGES_CAPTCHA_DATASETS[image_dataset]
@@ -236,7 +240,7 @@ class MemoryServer:
                                     k: [gzip.decompress(img) for img in v]
                                     for k, v in data["keys"].items()
                                 }
-                        self.captcha_image_data = data
+                        temp_image_data = data
                         logger.info("Loaded %s image captcha dataset", image_dataset)
                 except Exception as e:
                     logger.error(
@@ -255,7 +259,7 @@ class MemoryServer:
                     if dataset_path:
                         with open(dataset_path, "rb") as f:
                             data = pickle.load(f)
-                        self.captcha_audio_data = data
+                        temp_audio_data = data
                         logger.info("Loaded %s audio captcha dataset", audio_dataset)
                 except Exception as e:
                     logger.error(
@@ -265,10 +269,17 @@ class MemoryServer:
                     )
                     return False
 
-            return True
+                if temp_image_data:
+                    self.captcha_image_data = temp_image_data
+                if temp_audio_data:
+                    self.captcha_audio_data = temp_audio_data
+
+                return True
         except Exception as e:
             logger.error("Error loading captcha datasets: %s", e)
             return False
+
+        return False
 
     def check_and_update_data(self) -> None:
         """Check if data needs updating and update if necessary."""
