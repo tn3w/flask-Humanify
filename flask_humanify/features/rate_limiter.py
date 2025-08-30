@@ -44,9 +44,7 @@ class RateLimiter:
             self.use_client_id = humanify_use_client_id
 
         if self.use_client_id:
-            humanify_secret_key = app.config.get(
-                "HUMANIFY_SECRET_KEY", None
-            )
+            humanify_secret_key = app.config.get("HUMANIFY_SECRET_KEY", None)
             if isinstance(humanify_secret_key, bytes):
                 self._client_id_secret_key = humanify_secret_key
             elif humanify_secret_key is None:
@@ -77,11 +75,11 @@ class RateLimiter:
         self.app.before_request(self.before_request)
 
         if "humanify" not in self.app.blueprints:
-            template_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
+            template_dir = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)), "templates"
+            )
             rate_limiter_bp = Blueprint(
-                "humanify", 
-                __name__,
-                template_folder=template_dir
+                "humanify", __name__, template_folder=template_dir
             )
 
             @rate_limiter_bp.route("/rate_limited", methods=["GET"])
@@ -99,7 +97,12 @@ class RateLimiter:
 
             app.register_blueprint(rate_limiter_bp, url_prefix="/humanify")
         else:
-            @app.route("/humanify/rate_limited", methods=["GET"], endpoint="humanify.rate_limited")
+
+            @app.route(
+                "/humanify/rate_limited",
+                methods=["GET"],
+                endpoint="humanify.rate_limited",
+            )
             def rate_limited():
                 """
                 Rate limited route.
