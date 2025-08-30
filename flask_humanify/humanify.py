@@ -288,7 +288,7 @@ class Humanify:
             if request.endpoint and request.endpoint.startswith("humanify."):
                 return
 
-            if action not in ["challenge", "deny_access", "allways_challenge"]:
+            if action not in ["challenge", "deny_access", "always_challenge"]:
                 return
 
             current_endpoint = request.endpoint or ""
@@ -330,7 +330,7 @@ class Humanify:
                     return self.deny_access()
 
                 if not self.has_valid_clearance_token:
-                    if action == "allways_challenge" or is_bot:
+                    if action == "always_challenge" or is_bot:
                         return self.challenge()
 
         if self.use_client_id:
