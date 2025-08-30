@@ -155,10 +155,14 @@
 
             <div class="text-container">
                 {% if subject == "smiling dog" %}
-                <p>To verify you're not a bot, select the dog that smiles like shown above.</p>
+                <p>
+                    Please confirm that you're not a bot by selecting the dog that is smiling, as
+                    shown above.
+                </p>
                 {% else %}
                 <p>
-                    To verify you're not a bot, select the image that matches the motif shown above.
+                    Please confirm that you're not a bot by selecting the image that matches the
+                    motif shown above.
                 </p>
                 {% endif %} {% if error %}
                 <p class="error">{{ error }}</p>

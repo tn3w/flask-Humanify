@@ -99,10 +99,7 @@ def get_return_url(request: Request) -> str:
     if parsed_url.netloc or parsed_url.scheme:
         return "/"
 
-    if return_url.count("?") == 1:
-        return return_url.strip("?")
-
-    return return_url
+    return return_url.rstrip("?")
 
 
 def generate_random_token(length: int = 32) -> str:
@@ -471,7 +468,7 @@ def mix_audio(audio1, audio2, position_ms=0):
     try:
         return audio1.overlay(audio2, position=position_ms)
     except Exception as e:
-        logger.error(f"Audio overlay failed: {e}")
+        logger.error("Audio overlay failed: %s", e)
         try:
             if audio1.frame_rate != audio2.frame_rate:
                 audio2 = audio2.set_frame_rate(audio1.frame_rate)
@@ -482,7 +479,7 @@ def mix_audio(audio1, audio2, position_ms=0):
 
             return audio1.overlay(audio2, position=position_ms)
         except Exception as e2:
-            logger.error(f"Second audio overlay attempt failed: {e2}")
+            logger.error("Second audio overlay attempt failed: %s", e2)
             return audio1
 
 
@@ -543,7 +540,7 @@ def combine_audio_files(audio_files):
                 segment = AudioSegment.from_wav(wav_io)
                 segments.append(segment)
             except Exception as e:
-                logger.error(f"Error converting audio bytes to segment: {e}")
+                logger.error("Error converting audio bytes to segment: %s", e)
 
         if not segments:
             logger.error("No valid audio segments found")

@@ -3,6 +3,7 @@ import logging
 import random
 from typing import List, Optional, Union, Dict, Any, Pattern
 import re
+import hashlib
 import fnmatch
 
 from werkzeug.wrappers import Response
@@ -182,7 +183,9 @@ class Humanify:
             """
             if self.audio_dataset is None:
                 return redirect(
-                    url_for("humanify.challenge", return_url=request.full_path)
+                    url_for(
+                        "humanify.challenge", return_url=request.full_path.rstrip("?")
+                    )
                 )
 
             return self._render_challenge(is_audio=True)
@@ -299,6 +302,10 @@ class Humanify:
                 and matches_request_filters
                 and self.is_bot
             ):
+                limit_response = self._check_attempt_limit()
+                if limit_response:
+                    return limit_response
+
                 if action == "challenge":
                     return self.challenge()
                 if action == "deny_access":
@@ -430,18 +437,37 @@ class Humanify:
         """
         Redirect to the access denied page.
         """
-        return redirect(url_for("humanify.access_denied", return_url=request.full_path))
+        return redirect(
+            url_for("humanify.access_denied", return_url=request.full_path.rstrip("?"))
+        )
 
     def challenge(self) -> Response:
         """
         Challenge the client.
         """
-        return redirect(url_for("humanify.challenge", return_url=request.full_path))
+        limit_response = self._check_attempt_limit()
+        if limit_response:
+            return limit_response
+
+        return redirect(
+            url_for("humanify.challenge", return_url=request.full_path.rstrip("?"))
+        )
+
+    def _check_attempt_limit(self) -> Optional[Response]:
+        """Check if the IP has reached the attempt limit and return deny_access response if true."""
+        ip_hash = hashlib.sha256((self.client_ip or "127.0.0.1").encode()).hexdigest()
+        if self.memory_client.is_attempt_limit_reached(ip_hash):
+            return self.deny_access()
+        return None
 
     def _render_challenge(self, is_audio: bool = False) -> Response:
         return_url = get_return_url(request)
         if self.has_valid_clearance_token:
             return redirect(return_url)
+
+        limit_response = self._check_attempt_limit()
+        if limit_response:
+            return limit_response
 
         error = request.args.get("error", None)
         if error not in [
@@ -470,10 +496,10 @@ class Humanify:
         use_preview_image = captcha_config["preview_image"]
 
         images_bytes, correct_indexes, subject = self.memory_client.get_captcha_images(
-            num_correct=captcha_config["num_correct"],
-            num_images=captcha_config["num_images"],
-            preview_image=use_preview_image,
-            dataset_name=self.image_dataset,
+            dataset=self.image_dataset,
+            count=captcha_config["num_images"],
+            correct=captcha_config["num_correct"],
+            preview=use_preview_image,
         )
 
         if not images_bytes:
@@ -536,7 +562,7 @@ class Humanify:
         language = AUDIO_CAPTCHA_CONFIG["language"]
 
         audio_files, correct_chars = self.memory_client.get_captcha_audio(
-            num_chars=num_chars, language=language
+            dataset=self.audio_dataset, chars=num_chars, lang=language
         )
 
         if not audio_files:
@@ -572,6 +598,11 @@ class Humanify:
         return_url = get_return_url(request)
         if self.has_valid_clearance_token:
             return redirect(return_url)
+
+        ip_hash = hashlib.sha256((self.client_ip or "127.0.0.1").encode()).hexdigest()
+        failed_attempts = self.memory_client.record_failed_attempt(ip_hash)
+        if failed_attempts >= 3:
+            return self.deny_access()
 
         captcha_data = request.form.get("captcha_data", "")
         if not captcha_data:
@@ -632,6 +663,10 @@ class Humanify:
         return_url = get_return_url(request)
         if self.has_valid_clearance_token:
             return redirect(return_url)
+
+        limit_response = self._check_attempt_limit()
+        if limit_response:
+            return limit_response
 
         captcha_data = request.form.get("captcha_data", "")
         if not captcha_data:
