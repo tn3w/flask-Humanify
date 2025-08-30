@@ -195,7 +195,6 @@ class MemoryServer:
                     with open(path, "rb") as f:
                         data = pickle.load(f)
                     if data.get("type") == "image":
-                        # Decompress if needed
                         keys = data.get("keys", {})
                         if keys:
                             first_key = next(iter(keys))
@@ -271,7 +270,9 @@ class MemoryServer:
             return [], "", ""
 
         keys = data["keys"]
-        correct_key = next(iter(keys)) if len(keys) == 2 else random.choice(list(keys.keys()))
+        correct_key = (
+            next(iter(keys)) if len(keys) == 2 else random.choice(list(keys.keys()))
+        )
         correct_imgs = keys[correct_key]
         incorrect_imgs = [
             img for k, imgs in keys.items() for img in imgs if k != correct_key
@@ -338,7 +339,6 @@ class MemoryServer:
         now = datetime.now()
         cutoff = now - timedelta(hours=1)
 
-        # Clean old entries
         self.failed_attempts = {
             k: v for k, v in self.failed_attempts.items() if v[0] > cutoff
         }
@@ -615,7 +615,6 @@ class MemoryClient:
             if self.socket:
                 self.socket.send(f"{cmd}\n".encode("utf-8"))
 
-                # Read JSON response
                 json_data = b""
                 while True:
                     chunk = self.socket.recv(1)
@@ -627,7 +626,6 @@ class MemoryClient:
                 if response.get("status") != "success":
                     return [], "", ""
 
-                # Read images
                 images = []
                 for _ in range(response.get("num_images", 0)):
                     size = int.from_bytes(self.socket.recv(4), "big")
@@ -661,7 +659,6 @@ class MemoryClient:
             if self.socket:
                 self.socket.send(f"{cmd}\n".encode("utf-8"))
 
-                # Read JSON response
                 json_data = b""
                 while True:
                     chunk = self.socket.recv(1)
@@ -673,7 +670,6 @@ class MemoryClient:
                 if response.get("status") != "success":
                     return [], ""
 
-                # Read audio files
                 audio_files = []
                 for _ in range(response.get("num_files", 0)):
                     size = int.from_bytes(self.socket.recv(4), "big")
