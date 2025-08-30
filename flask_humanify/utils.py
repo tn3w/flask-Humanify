@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import io
+import re
 import logging
 import math
 import random
@@ -20,6 +21,33 @@ from scipy.io.wavfile import write as write_wav
 
 
 logger = logging.getLogger(__name__)
+
+
+def get_crawler_name(user_agent):
+    """
+    Extracts crawler name from user agent string using regex
+    Assumes the input is already confirmed to be a crawler user agent
+
+    Args:
+        user_agent (str): The crawler user agent string
+
+    Returns:
+        str or None: The crawler name or None if not found
+    """
+    if not user_agent:
+        return None
+
+    pattern = (
+        r"(?:^|compatible; )"
+        r"([A-Za-z][A-Za-z0-9._-]*(?:bot|spider|crawler|Bot|Spider|Crawler))"
+        r"[/\s]?[\d.]*"
+        r"|"
+        r"^([A-Za-z][A-Za-z0-9._-]+)"
+        r"(?:/[\d.]+)?"
+    )
+
+    match = re.search(pattern, user_agent)
+    return match.group(1) or match.group(2) if match else None
 
 
 def is_valid_routable_ip(ip: str) -> bool:

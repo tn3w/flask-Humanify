@@ -1,6 +1,6 @@
 [project]
 name = "flask-Humanify"
-version = "0.2.6.1"
+version = "0.2.7"
 description = "Protect against bots and DDoS attacks"
 readme = "README.md"
 authors = [
@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = ["Flask", "netaddr", "opencv-python-headless", "numpy", "cryptography", "scipy", "pydub"]
+dependencies = ["Flask", "netaddr", "opencv-python-headless", "numpy", "cryptography", "scipy", "pydub", "crawler-user-agents"]
 
 [project.urls]
 Homepage = "https://github.com/tn3w/flask-Humanify"

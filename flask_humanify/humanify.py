@@ -5,6 +5,7 @@ from typing import List, Optional, Union, Dict, Any, Pattern
 import re
 import fnmatch
 
+import crawleruseragents
 from werkzeug.wrappers import Response
 from flask import (
     Blueprint,
@@ -82,6 +83,8 @@ class HumanifyResult:
     is_firehol: bool = False
     is_tor_exit_node: bool = False
     is_invalid_ip: bool = False
+    is_crawler: bool = False
+    crawler_name: Optional[str] = None
 
     @property
     def is_bot(self) -> bool:
@@ -96,14 +99,24 @@ class HumanifyResult:
             or self.is_forum_spammer
             or self.is_firehol
             or self.is_tor_exit_node
+            or self.is_crawler
         )
 
     @classmethod
-    def from_ip_groups(cls, ip: str, ip_groups: List[str]) -> "HumanifyResult":
+    def from_ip_groups(
+        cls, ip: str, ip_groups: List[str], user_agent: Optional[str] = None
+    ) -> "HumanifyResult":
         """
-        Create a HumanifyResult from a list of IP groups.
+        Create a HumanifyResult from a list of IP groups and optional user agent.
         """
         vpn_provider = next((name for name in VPN_PROVIDERS if name in ip_groups), None)
+
+        is_crawler = False
+        crawler_name = None
+        if user_agent:
+            is_crawler = crawleruseragents.is_crawler(user_agent)
+            if is_crawler:
+                crawler_name = user_agent.split("/")[0].strip()
 
         result = HumanifyResult(
             ip=ip,
@@ -114,6 +127,8 @@ class HumanifyResult:
             is_forum_spammer="StopForumSpam" in ip_groups,
             is_firehol="FireholLevel1" in ip_groups,
             is_tor_exit_node="TorExitNodes" in ip_groups,
+            is_crawler=is_crawler,
+            crawler_name=crawler_name,
         )
         return result
 
@@ -273,6 +288,9 @@ class Humanify:
             if request.endpoint and request.endpoint.startswith("humanify."):
                 return
 
+            if action not in ["challenge", "deny_access", "allways_challenge"]:
+                return
+
             current_endpoint = request.endpoint or ""
             current_path = request.path
 
@@ -302,19 +320,18 @@ class Humanify:
                 not request_filters or self._matches_request_filters(request_filters)
             )
 
-            if (
-                (matches_endpoint or matches_url)
-                and matches_request_filters
-                and self.is_bot
-            ):
+            if (matches_endpoint or matches_url) and matches_request_filters:
                 limit_response = self._check_attempt_limit()
                 if limit_response:
                     return limit_response
 
-                if action == "challenge":
-                    return self.challenge()
-                if action == "deny_access":
+                is_bot = self.check_result.is_bot
+                if is_bot and action == "deny_access":
                     return self.deny_access()
+
+                if not self.has_valid_clearance_token:
+                    if action == "allways_challenge" or is_bot:
+                        return self.challenge()
 
         if self.use_client_id:
 
@@ -429,14 +446,18 @@ class Humanify:
         if self.client_ip is None:
             return HumanifyResult(ip=self.client_ip, is_invalid_ip=True)
 
+        user_agent = request.user_agent.string or ""
+
         if hasattr(g, "humanify_ip_groups"):
             humanify_ip_groups = g.humanify_ip_groups
             if isinstance(humanify_ip_groups, list):
-                return HumanifyResult.from_ip_groups(self.client_ip, humanify_ip_groups)
+                return HumanifyResult.from_ip_groups(
+                    self.client_ip, humanify_ip_groups, user_agent
+                )
 
         ip_groups = self.memory_client.lookup_ip(self.client_ip)
         g.humanify_ip_groups = ip_groups
-        return HumanifyResult.from_ip_groups(self.client_ip, ip_groups)
+        return HumanifyResult.from_ip_groups(self.client_ip, ip_groups, user_agent)
 
     @property
     def has_valid_clearance_token(self) -> bool:

@@ -5,3 +5,4 @@ numpy
 cryptography
 scipy
 pydub
+crawler-user-agents

@@ -569,7 +569,8 @@ class MemoryClient:
 
         try:
             if self.socket:
-                self.socket.send(f"{command}\n".encode("utf-8"))
+                clean_command = command.split('\n')[0].strip()
+                self.socket.send(f"{clean_command}\n".encode("utf-8"))
 
                 response_bytes = b""
                 while True:
