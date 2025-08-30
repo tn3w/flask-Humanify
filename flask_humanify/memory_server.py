@@ -271,7 +271,7 @@ class MemoryServer:
 
         keys = data["keys"]
         correct_key = (
-            next(iter(keys)) if len(keys) == 2 else random.choice(list(keys.keys()))
+            next(iter(keys)) if len(keys) <= 2 else random.choice(list(keys.keys()))
         )
         correct_imgs = keys[correct_key]
         incorrect_imgs = [
@@ -374,77 +374,95 @@ class MemoryServer:
                         break
                 except socket.timeout:
                     break
+                except UnicodeDecodeError as e:
+                    logger.error("Client %s sent invalid UTF-8 data: %s", addr, e)
+                    break
 
                 response = ""
 
-                if data.startswith("CHECK_LIMIT:"):
-                    response = str(self.is_limited(data[12:])).lower()
-                elif data.startswith("FAILED_ATTEMPT:"):
-                    response = str(self.record_failure(data[15:]))
-                elif data.startswith("IPSET:"):
-                    response = json.dumps(self.find_groups(data[6:]))
-                elif data.startswith("SECRET_KEY"):
-                    response = json.dumps(self.secret_key.hex())
-                elif data.startswith("IMAGE_CAPTCHA:"):
-                    parts = data.split(":")
-                    dataset = parts[1] if len(parts) > 1 and parts[1] else "ai_dogs"
-                    count = (
-                        int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 9
-                    )
-                    correct = (
-                        int(parts[3])
-                        if len(parts) > 3 and parts[3].isdigit()
-                        else (2, 3)
-                    )
-                    preview = len(parts) > 4 and parts[4].lower() == "true"
+                try:
+                    if data.startswith("CHECK_LIMIT:"):
+                        response = str(self.is_limited(data[12:])).lower()
+                    elif data.startswith("FAILED_ATTEMPT:"):
+                        response = str(self.record_failure(data[15:]))
+                    elif data.startswith("IPSET:"):
+                        response = json.dumps(self.find_groups(data[6:]))
+                    elif data.startswith("SECRET_KEY"):
+                        response = json.dumps(self.secret_key.hex())
+                    elif data.startswith("IMAGE_CAPTCHA:"):
+                        parts = data.split(":")
+                        dataset = parts[1] if len(parts) > 1 and parts[1] else "ai_dogs"
+                        count = (
+                            int(parts[2])
+                            if len(parts) > 2 and parts[2].isdigit()
+                            else 9
+                        )
+                        correct = (
+                            int(parts[3])
+                            if len(parts) > 3 and parts[3].isdigit()
+                            else (2, 3)
+                        )
+                        preview = len(parts) > 4 and parts[4].lower() == "true"
 
-                    images, indices, subject = self.get_images(
-                        dataset, count, correct, preview
-                    )
-                    response = json.dumps(
-                        {
-                            "status": "success" if images else "error",
-                            "correct_indexes": indices,
-                            "subject": subject,
-                            "num_images": len(images),
-                        }
-                    )
+                        images, indices, subject = self.get_images(
+                            dataset, count, correct, preview
+                        )
+                        response = json.dumps(
+                            {
+                                "status": "success" if images else "error",
+                                "correct_indexes": indices,
+                                "subject": subject,
+                                "num_images": len(images),
+                            }
+                        )
+
+                        client.send(f"{response}\n".encode("utf-8"))
+                        for img in images:
+                            client.send(len(img).to_bytes(4, "big") + img)
+                        continue
+
+                    elif data.startswith("AUDIO_CAPTCHA:"):
+                        parts = data.split(":")
+                        dataset = (
+                            parts[1] if len(parts) > 1 and parts[1] else "characters"
+                        )
+                        chars = (
+                            int(parts[2])
+                            if len(parts) > 2 and parts[2].isdigit()
+                            else 6
+                        )
+                        lang = parts[3] if len(parts) > 3 else "en"
+
+                        audio, correct = self.get_audio(dataset, chars, lang)
+                        response = json.dumps(
+                            {
+                                "status": "success" if audio else "error",
+                                "correct_chars": correct,
+                                "num_files": len(audio),
+                            }
+                        )
+
+                        client.send(f"{response}\n".encode("utf-8"))
+                        for a in audio:
+                            client.send(len(a).to_bytes(4, "big") + a)
+                        continue
+                    else:
+                        response = json.dumps(self.find_groups(data))
 
                     client.send(f"{response}\n".encode("utf-8"))
-                    for img in images:
-                        client.send(len(img).to_bytes(4, "big") + img)
-                    continue
 
-                elif data.startswith("AUDIO_CAPTCHA:"):
-                    parts = data.split(":")
-                    dataset = parts[1] if len(parts) > 1 and parts[1] else "characters"
-                    chars = (
-                        int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 6
-                    )
-                    lang = parts[3] if len(parts) > 3 else "en"
-
-                    audio, correct = self.get_audio(dataset, chars, lang)
-                    response = json.dumps(
-                        {
-                            "status": "success" if audio else "error",
-                            "correct_chars": correct,
-                            "num_files": len(audio),
-                        }
-                    )
-
-                    client.send(f"{response}\n".encode("utf-8"))
-                    for a in audio:
-                        client.send(len(a).to_bytes(4, "big") + a)
-                    continue
-                else:
-                    response = json.dumps(self.find_groups(data))
-
-                client.send(f"{response}\n".encode("utf-8"))
+                except ValueError as e:
+                    logger.error("Error processing request from %s: %s", addr, e)
+                    error_response = json.dumps({"error": "invalid_request"})
+                    client.send(f"{error_response}\n".encode("utf-8"))
 
         except (ConnectionResetError, BrokenPipeError, OSError) as e:
             logger.error("Client error %s: %s", addr, e)
         finally:
-            client.close()
+            try:
+                client.close()
+            except (OSError, socket.error):
+                pass
 
     def run(
         self,
@@ -552,7 +570,29 @@ class MemoryClient:
         try:
             if self.socket:
                 self.socket.send(f"{command}\n".encode("utf-8"))
-                return self.socket.recv(4096).decode("utf-8").strip()
+
+                response_bytes = b""
+                while True:
+                    try:
+                        chunk = self.socket.recv(1)
+                        if not chunk:
+                            break
+                        if chunk == b"\n":
+                            break
+                        response_bytes += chunk
+                    except socket.timeout:
+                        break
+
+                try:
+                    return response_bytes.decode("utf-8").strip()
+                except UnicodeDecodeError as decode_error:
+                    logger.error(
+                        "Unicode decode error: %s, raw bytes: %r",
+                        decode_error,
+                        response_bytes,
+                    )
+                    return ""
+
         except (ConnectionResetError, BrokenPipeError, OSError) as e:
             logger.error("Communication error: %s", e)
             try:
@@ -565,7 +605,21 @@ class MemoryClient:
                 try:
                     if self.socket:
                         self.socket.send(f"{command}\n".encode("utf-8"))
-                        return self.socket.recv(4096).decode("utf-8").strip()
+
+                        response_bytes = b""
+                        while True:
+                            try:
+                                chunk = self.socket.recv(1)
+                                if not chunk or chunk == b"\n":
+                                    break
+                                response_bytes += chunk
+                            except socket.timeout:
+                                break
+
+                        try:
+                            return response_bytes.decode("utf-8").strip()
+                        except UnicodeDecodeError:
+                            return ""
                 except (ConnectionResetError, BrokenPipeError, OSError):
                     pass
             return ""

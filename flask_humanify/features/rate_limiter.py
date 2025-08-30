@@ -73,7 +73,9 @@ class RateLimiter:
         ip = self._client_ip or "127.0.0.1"
         if self.is_rate_limited(ip):
             return redirect(
-                url_for("humanify.rate_limited", return_url=request.full_path)
+                url_for(
+                    "humanify.rate_limited", return_url=request.full_path.rstrip("?")
+                )
             )
 
     def is_rate_limited(self, ip: str) -> bool:
