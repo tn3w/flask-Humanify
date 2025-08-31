@@ -9,5 +9,5 @@ with urlopen(
 
 data["_timestamp"] = datetime.now().isoformat()
 
-with open("ipset.json", "w", encoding="utf-8") as f:
+with open("flask_humanify/datasets/ipset.json", "w", encoding="utf-8") as f:
     json.dump(data, f)

@@ -7,7 +7,9 @@ import fnmatch
 
 import crawleruseragents
 from werkzeug.wrappers import Response
+from werkzeug.middleware.proxy_fix import ProxyFix
 from flask import (
+    Flask,
     Blueprint,
     request,
     render_template,
@@ -19,7 +21,7 @@ from flask import (
 )
 from .memory_server import MemoryClient, ensure_server_running
 from .utils import (
-    get_client_ip,
+    is_valid_routable_ip,
     get_return_url,
     get_or_create_client_id,
     validate_clearance_token,
@@ -150,21 +152,27 @@ class Humanify:
         challenge_type: str = "one_click",
         image_dataset: Optional[str] = "ai_dogs",
         audio_dataset: Optional[str] = None,
+        behind_proxy: bool = True,
         use_client_id: bool = False,
-    ):
+    ) -> None:
         self.app = app
         self.challenge_type = challenge_type
         self.image_dataset = image_dataset
         self.audio_dataset = audio_dataset
+        self.behind_proxy = behind_proxy
         self.use_client_id = use_client_id
         if app is not None:
             self.init_app(app)
 
-    def init_app(self, app):
+    def init_app(self, app: Flask) -> None:
         """
         Initialize the Humanify extension.
         """
         self.app = app
+        if not isinstance(app.wsgi_app, ProxyFix) and self.behind_proxy:
+            app.wsgi_app = ProxyFix(
+                app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1
+            )
         self.app.config.setdefault("HUMANIFY_USE_CLIENT_ID", self.use_client_id)
 
         ensure_server_running(
@@ -434,7 +442,11 @@ class Humanify:
         if hasattr(g, "humanify_client_ip"):
             return g.humanify_client_ip
 
-        client_ip = get_client_ip(request)
+        client_ip = (
+            request.remote_addr
+            if is_valid_routable_ip(request.remote_addr or "127.0.0.1")
+            else None
+        )
         g.humanify_client_ip = client_ip
         return client_ip
 

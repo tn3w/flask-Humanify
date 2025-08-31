@@ -4,9 +4,14 @@ from collections import defaultdict, deque
 from typing import Optional
 
 from werkzeug.wrappers import Response
+from werkzeug.middleware.proxy_fix import ProxyFix
 from flask import Flask, Blueprint, request, redirect, url_for, render_template, g
 from flask_humanify.memory_server import MemoryClient, ensure_server_running
-from flask_humanify.utils import get_client_ip, get_or_create_client_id, get_return_url
+from flask_humanify.utils import (
+    is_valid_routable_ip,
+    get_or_create_client_id,
+    get_return_url,
+)
 
 
 class RateLimiter:
@@ -19,12 +24,14 @@ class RateLimiter:
         app=None,
         max_requests: int = 10,
         time_window: int = 10,
+        behind_proxy: bool = True,
         use_client_id: Optional[bool] = None,
     ) -> None:
         """
         Initialize the rate limiter.
         """
         self.app = app
+        self.behind_proxy = behind_proxy
         self.use_client_id = use_client_id
         self._client_id_secret_key = None
         if app is not None:
@@ -39,6 +46,11 @@ class RateLimiter:
         """
 
         self.app = app
+        if not isinstance(app.wsgi_app, ProxyFix) and self.behind_proxy:
+            app.wsgi_app = ProxyFix(
+                app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1
+            )
+
         humanify_use_client_id = app.config.get("HUMANIFY_USE_CLIENT_ID", False)
         if self.use_client_id is None:
             self.use_client_id = humanify_use_client_id
@@ -121,7 +133,11 @@ class RateLimiter:
         if hasattr(g, "humanify_client_ip"):
             return g.humanify_client_ip
 
-        client_ip = get_client_ip(request)
+        client_ip = (
+            request.remote_addr
+            if is_valid_routable_ip(request.remote_addr or "127.0.0.1")
+            else None
+        )
         g.humanify_client_ip = client_ip
         return client_ip
 

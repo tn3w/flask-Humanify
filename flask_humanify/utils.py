@@ -70,62 +70,6 @@ def is_valid_routable_ip(ip: str) -> bool:
         return False
 
 
-def get_client_ip(request: Request) -> Optional[str]:
-    """Get the client IP address from the request."""
-    remote_ip = request.environ.get("REMOTE_ADDR")
-    if (
-        remote_ip
-        and remote_ip not in ["127.0.0.1", "::1"]
-        and is_valid_routable_ip(remote_ip)
-    ):
-        try:
-            ip_obj = IPAddress(remote_ip)
-            if ip_obj.version in [4, 6]:
-                return remote_ip
-        except (ValueError, AddrFormatError):
-            pass
-
-    valid_ipv4s: List[str] = []
-    valid_ipv6s: List[str] = []
-
-    proxy_headers = [
-        "HTTP_CF_CONNECTING_IP",
-        "HTTP_X_REAL_IP",
-        "HTTP_X_FORWARDED_FOR",
-        "HTTP_X_FORWARDED",
-    ]
-
-    for header in proxy_headers:
-        if not (value := request.environ.get(header)):
-            continue
-
-        try:
-            ip = value.split(",")[0].strip()
-
-            if ip.startswith("[") and "]" in ip:
-                ip = ip[1 : ip.find("]")]
-            elif ":" in ip and ip.count(":") == 1 and "::" not in ip:
-                ip = ip.split(":")[0]
-
-            if is_valid_routable_ip(ip):
-                ip_obj = IPAddress(ip)
-                if ip_obj.version == 4:
-                    valid_ipv4s.append(ip)
-                    break
-                elif ip_obj.version == 6:
-                    valid_ipv6s.append(ip)
-
-        except (ValueError, AddrFormatError):
-            continue
-
-    if valid_ipv4s:
-        return valid_ipv4s[0]
-    if valid_ipv6s:
-        return valid_ipv6s[0]
-
-    return None
-
-
 def get_return_url(request: Request) -> str:
     """Get the return URL from the request."""
     return_url = request.args.get(

@@ -11,6 +11,11 @@ import urllib.error
 import gzip
 import pickle
 import random
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 import secrets
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
@@ -74,8 +79,9 @@ class MemoryServer:
 
         self.port = port
         self.data_path = data_path or IPSET_DATA_PATH
-        self._data_lock = threading.Lock()
+        self._data_lock = threading.RLock()
         self._socket_lock = threading.Lock()
+        self._file_lock = threading.Lock()
         self.failed_attempts: Dict[str, Tuple[datetime, int]] = {}
         self.ip_to_groups: Dict[str, List[str]] = {}
         self.cidrs_to_ips: Dict[IPNetwork, List[str]] = {}
@@ -90,14 +96,21 @@ class MemoryServer:
 
     def _load_or_create_secret_key(self) -> bytes:
         """Load the secret key from file or create a new one if it doesn't exist."""
-        if SECRET_KEY_FILE.exists():
-            with open(SECRET_KEY_FILE, "rb") as f:
-                return f.read()
+        with self._file_lock:
+            if SECRET_KEY_FILE.exists():
+                try:
+                    with open(SECRET_KEY_FILE, "rb") as f:
+                        return f.read()
+                except OSError as e:
+                    logger.error("Error reading secret key: %s", e)
 
-        secret_key = secrets.token_bytes(32)
-        with open(SECRET_KEY_FILE, "wb") as f:
-            f.write(secret_key)
-        return secret_key
+            secret_key = secrets.token_bytes(32)
+            try:
+                with open(SECRET_KEY_FILE, "wb") as f:
+                    f.write(secret_key)
+            except OSError as e:
+                logger.error("Error writing secret key: %s", e)
+            return secret_key
 
     def is_server_running(self) -> bool:
         """Check if the server is already running on the specified port."""
@@ -109,29 +122,50 @@ class MemoryServer:
 
     def _download_data(self, force: bool = False) -> bool:
         """Download IP set data from GitHub and update the timestamp."""
-        if not force and os.path.exists(self.data_path):
+        with self._file_lock:
+            if not force and os.path.exists(self.data_path):
+                try:
+                    with open(self.data_path, "r", encoding="utf-8") as f:
+                        if fcntl and hasattr(fcntl, "LOCK_SH"):
+                            try:
+                                fcntl.flock(f.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                            except (OSError, IOError):
+                                return True
+                        data = json.load(f)
+                    if isinstance(data, dict) and "_timestamp" in data:
+                        timestamp = datetime.fromisoformat(data["_timestamp"])
+                        if datetime.now() - timestamp < timedelta(days=7):
+                            return True
+                except (json.JSONDecodeError, KeyError, ValueError, OSError) as e:
+                    logger.warning("Error checking existing data: %s", e)
+
             try:
-                with open(self.data_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict) and "_timestamp" in data:
-                    timestamp = datetime.fromisoformat(data["_timestamp"])
-                    if datetime.now() - timestamp < timedelta(days=7):
-                        return True
-            except (json.JSONDecodeError, KeyError, ValueError, OSError):
-                pass
+                url = "https://raw.githubusercontent.com/tn3w/IPSet/refs/heads/master/ipset.json"
+                temp_path = self.data_path + ".tmp"
 
-        try:
-            url = "https://raw.githubusercontent.com/tn3w/IPSet/refs/heads/master/ipset.json"
-            with urllib.request.urlopen(url, timeout=30) as response:
-                data = json.loads(response.read().decode("utf-8"))
+                with urllib.request.urlopen(url, timeout=30) as response:
+                    data = json.loads(response.read().decode("utf-8"))
 
-            data["_timestamp"] = datetime.now().isoformat()
-            with open(self.data_path, "w", encoding="utf-8") as f:
-                json.dump(data, f)
-            return True
-        except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
-            logger.error("Error downloading IP data: %s", e)
-            return False
+                data["_timestamp"] = datetime.now().isoformat()
+
+                with open(temp_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+
+                if os.path.exists(temp_path):
+                    if os.path.exists(self.data_path):
+                        os.remove(self.data_path)
+                    os.rename(temp_path, self.data_path)
+
+                return True
+            except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+                logger.error("Error downloading IP data: %s", e)
+                temp_path = self.data_path + ".tmp"
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+                return False
 
     def _download_captcha(self, url: str, name: str) -> str:
         """Download a captcha dataset from the internet."""
@@ -140,39 +174,75 @@ class MemoryServer:
             return str(file_path)
 
         try:
-            urllib.request.urlretrieve(url, file_path)
+            temp_path = str(file_path) + ".tmp"
+            urllib.request.urlretrieve(url, temp_path)
+            if os.path.exists(temp_path):
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                os.rename(temp_path, file_path)
             return str(file_path)
         except (urllib.error.URLError, OSError) as e:
             logger.error("Failed to download %s: %s", name, e)
+            temp_path = str(file_path) + ".tmp"
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
             return ""
 
     def _load_data(self) -> bool:
-        """Load IP set data into memory."""
-        try:
-            with open(self.data_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            with self._data_lock:
-                self.last_update = datetime.fromisoformat(
-                    data.pop("_timestamp", datetime.now().isoformat())
-                )
-
-                self.ip_to_groups.clear()
-                self.cidrs_to_ips.clear()
-
-                for group, ips in data.items():
-                    for ip in ips:
-                        if "/" in ip:
+        """Load IP set data into memory with proper file locking."""
+        with self._file_lock:
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    with open(self.data_path, "r", encoding="utf-8") as f:
+                        if fcntl and hasattr(fcntl, "LOCK_SH"):
                             try:
-                                cidr = IPNetwork(ip)
-                                self.cidrs_to_ips.setdefault(cidr, []).append(group)
-                            except (ValueError, TypeError):
+                                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                            except (OSError, IOError):
+                                pass
+
+                        data = json.load(f)
+
+                    with self._data_lock:
+                        self.last_update = datetime.fromisoformat(
+                            data.pop("_timestamp", datetime.now().isoformat())
+                        )
+
+                        self.ip_to_groups.clear()
+                        self.cidrs_to_ips.clear()
+
+                        for group, ips in data.items():
+                            if not isinstance(ips, list):
                                 continue
-                        else:
-                            self.ip_to_groups.setdefault(ip, []).append(group)
-            return True
-        except (json.JSONDecodeError, OSError) as e:
-            logger.error("Error loading IP data: %s", e)
+                            for ip in ips:
+                                if not isinstance(ip, str):
+                                    continue
+                                if "/" in ip:
+                                    try:
+                                        cidr = IPNetwork(ip)
+                                        self.cidrs_to_ips.setdefault(cidr, []).append(
+                                            group
+                                        )
+                                    except (ValueError, TypeError):
+                                        continue
+                                else:
+                                    self.ip_to_groups.setdefault(ip, []).append(group)
+                    return True
+
+                except json.JSONDecodeError as e:
+                    logger.error("JSON decode error on attempt %d: %s", attempt + 1, e)
+                    if attempt < max_retries - 1:
+                        time.sleep(0.5 * (attempt + 1))
+                    continue
+                except OSError as e:
+                    logger.error("File error on attempt %d: %s", attempt + 1, e)
+                    if attempt < max_retries - 1:
+                        time.sleep(0.5 * (attempt + 1))
+                    continue
+
             return False
 
     def _load_captcha_datasets(
@@ -238,7 +308,17 @@ class MemoryServer:
             threading.Thread(target=update_task, daemon=True).start()
 
     def find_groups(self, ip: str) -> List[str]:
-        """Find all groups matching the given IP."""
+        """Find all groups matching the given IP with input validation."""
+        if not ip or not isinstance(ip, str):
+            return []
+
+        ip = ip.strip()
+        if not ip or len(ip) > 45:
+            return []
+
+        if not all(c in "0123456789abcdefABCDEF.:" for c in ip):
+            return []
+
         self._check_update()
 
         with self._data_lock:
@@ -249,8 +329,9 @@ class MemoryServer:
                 for cidr, cidr_groups in self.cidrs_to_ips.items():
                     if cidr.version == ip_obj.version and ip_obj in cidr:
                         groups.extend(g for g in cidr_groups if g not in groups)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.warning("Invalid IP address format: %s - %s", ip, e)
+                return []
 
             return groups
 
@@ -364,29 +445,53 @@ class MemoryServer:
         )
 
     def _handle_client(self, client: socket.socket, addr: Tuple[str, int]) -> None:
-        """Handle client connection and queries."""
+        """Handle client connection and queries with better error handling."""
         try:
             client.settimeout(30.0)
             while True:
                 try:
-                    data = client.recv(1024).decode("utf-8").strip()
+                    buffer = b""
+                    while b"\n" not in buffer:
+                        chunk = client.recv(1024)
+                        if not chunk:
+                            return
+                        buffer += chunk
+                        if len(buffer) > 8192:
+                            logger.warning("Client %s sent too much data", addr)
+                            return
+
+                    data, buffer = buffer.split(b"\n", 1)
+                    data = data.decode("utf-8").strip()
+
                     if not data:
                         break
+
                 except socket.timeout:
                     break
                 except UnicodeDecodeError as e:
                     logger.error("Client %s sent invalid UTF-8 data: %s", addr, e)
+                    break
+                except (ConnectionResetError, BrokenPipeError):
                     break
 
                 response = ""
 
                 try:
                     if data.startswith("CHECK_LIMIT:"):
-                        response = str(self.is_limited(data[12:])).lower()
+                        ip_hash = data[12:].strip()
+                        if ip_hash:
+                            response = str(self.is_limited(ip_hash)).lower()
+                        else:
+                            response = "false"
                     elif data.startswith("FAILED_ATTEMPT:"):
-                        response = str(self.record_failure(data[15:]))
+                        ip_hash = data[15:].strip()
+                        if ip_hash:
+                            response = str(self.record_failure(ip_hash))
+                        else:
+                            response = "0"
                     elif data.startswith("IPSET:"):
-                        response = json.dumps(self.find_groups(data[6:]))
+                        ip_addr = data[6:].strip()
+                        response = json.dumps(self.find_groups(ip_addr))
                     elif data.startswith("SECRET_KEY"):
                         response = json.dumps(self.secret_key.hex())
                     elif data.startswith("IMAGE_CAPTCHA:"):
@@ -416,9 +521,12 @@ class MemoryServer:
                             }
                         )
 
-                        client.send(f"{response}\n".encode("utf-8"))
-                        for img in images:
-                            client.send(len(img).to_bytes(4, "big") + img)
+                        try:
+                            client.send(f"{response}\n".encode("utf-8"))
+                            for img in images:
+                                client.send(len(img).to_bytes(4, "big") + img)
+                        except (ConnectionResetError, BrokenPipeError):
+                            break
                         continue
 
                     elif data.startswith("AUDIO_CAPTCHA:"):
@@ -442,21 +550,33 @@ class MemoryServer:
                             }
                         )
 
-                        client.send(f"{response}\n".encode("utf-8"))
-                        for a in audio:
-                            client.send(len(a).to_bytes(4, "big") + a)
+                        try:
+                            client.send(f"{response}\n".encode("utf-8"))
+                            for a in audio:
+                                client.send(len(a).to_bytes(4, "big") + a)
+                        except (ConnectionResetError, BrokenPipeError):
+                            break
                         continue
                     else:
-                        response = json.dumps(self.find_groups(data))
+                        clean_data = data.strip()
+                        response = json.dumps(self.find_groups(clean_data))
 
-                    client.send(f"{response}\n".encode("utf-8"))
+                    try:
+                        client.send(f"{response}\n".encode("utf-8"))
+                    except (ConnectionResetError, BrokenPipeError):
+                        break
 
                 except ValueError as e:
                     logger.error("Error processing request from %s: %s", addr, e)
-                    error_response = json.dumps({"error": "invalid_request"})
-                    client.send(f"{error_response}\n".encode("utf-8"))
+                    try:
+                        error_response = json.dumps({"error": "invalid_request"})
+                        client.send(f"{error_response}\n".encode("utf-8"))
+                    except (ConnectionResetError, BrokenPipeError):
+                        break
 
-        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+        except (ConnectionResetError, BrokenPipeError):
+            pass
+        except OSError as e:
             logger.error("Client error %s: %s", addr, e)
         finally:
             try:
@@ -564,69 +684,57 @@ class MemoryClient:
             return False
 
     def _send_recv(self, command: str) -> str:
-        """Send command and receive response."""
+        """Send command and receive response with better error handling."""
         if not self.socket and not self.connect():
             return ""
 
-        try:
-            if self.socket:
-                clean_command = command.replace("\n", " ").strip()
-                self.socket.send(f"{clean_command}\n".encode("utf-8"))
-
-                response_bytes = b""
-                buf_size = 4096
-                while True:
-                    try:
-                        chunk = self.socket.recv(buf_size)
-                        if not chunk:
-                            break
-                        response_bytes += chunk
-                        if b"\n" in chunk:
-                            response_bytes = response_bytes.split(b"\n")[0]
-                            break
-                    except socket.timeout:
-                        break
-
-                try:
-                    return response_bytes.decode("utf-8").strip()
-                except UnicodeDecodeError as decode_error:
-                    logger.error(
-                        "Unicode decode error: %s, raw bytes: %r",
-                        decode_error,
-                        response_bytes,
-                    )
-                    return ""
-
-        except (ConnectionResetError, BrokenPipeError, OSError) as e:
-            logger.error("Communication error: %s", e)
+        max_retries = 2
+        for attempt in range(max_retries):
             try:
                 if self.socket:
-                    self.socket.close()
-            except (OSError, socket.error):
-                pass
-            self.socket = None
-            if self.connect():
+                    clean_command = command.replace("\n", " ").strip()
+                    self.socket.send(f"{clean_command}\n".encode("utf-8"))
+
+                    response_bytes = b""
+                    while b"\n" not in response_bytes:
+                        try:
+                            chunk = self.socket.recv(4096)
+                            if not chunk:
+                                break
+                            response_bytes += chunk
+                        except socket.timeout:
+                            break
+
+                    if b"\n" in response_bytes:
+                        response_bytes = response_bytes.split(b"\n")[0]
+
+                    try:
+                        return response_bytes.decode("utf-8").strip()
+                    except UnicodeDecodeError as decode_error:
+                        logger.error(
+                            "Unicode decode error: %s, raw bytes: %r",
+                            decode_error,
+                            response_bytes,
+                        )
+                        return ""
+
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                logger.error("Communication error on attempt %d: %s", attempt + 1, e)
+
                 try:
                     if self.socket:
-                        self.socket.send(f"{command}\n".encode("utf-8"))
-
-                        response_bytes = b""
-                        while True:
-                            try:
-                                chunk = self.socket.recv(1)
-                                if not chunk or chunk == b"\n":
-                                    break
-                                response_bytes += chunk
-                            except socket.timeout:
-                                break
-
-                        try:
-                            return response_bytes.decode("utf-8").strip()
-                        except UnicodeDecodeError:
-                            return ""
-                except (ConnectionResetError, BrokenPipeError, OSError):
+                        self.socket.close()
+                except (OSError, socket.error):
                     pass
-            return ""
+                self.socket = None
+
+                if attempt < max_retries - 1:
+                    time.sleep(0.1 * (attempt + 1))
+                    if not self.connect():
+                        continue
+                else:
+                    return ""
+
         return ""
 
     def is_attempt_limit_reached(self, ip_hash: str) -> bool:
