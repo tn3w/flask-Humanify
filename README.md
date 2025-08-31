@@ -120,6 +120,63 @@ The rate limiter will automatically:
 - Redirect to a rate-limited page when limits are exceeded
 - Ignore rate limits for special pages like the rate-limited and access-denied pages
 
+### CAPTCHA Integration
+
+Flask-Humanify includes built-in support for multiple CAPTCHA providers to add an extra layer of protection:
+
+```python
+from flask import Flask
+from flask_humanify import CaptchaEmbed
+
+app = Flask(__name__)
+
+# Initialize CAPTCHA with automatic theme detection and language
+captcha = CaptchaEmbed(
+    app,
+    theme="auto",          # Options: "light", "dark", "auto"
+    language="auto",       # Use specific language code like "en" if needed
+    recaptcha_site_key="your_site_key",    # For Google reCAPTCHA
+    recaptcha_secret="your_secret_key",
+    hcaptcha_site_key="your_site_key",     # For hCaptcha
+    hcaptcha_secret="your_secret_key",
+    turnstile_site_key="your_site_key",    # For Cloudflare Turnstile
+    turnstile_secret="your_secret_key",
+    friendly_site_key="your_site_key",     # For Friendly Captcha
+    friendly_secret="your_secret_key",
+    altcha_secret="your_secret_key"        # For Altcha (a random generated secret)
+)
+
+@app.route("/protected", methods=["GET", "POST"])
+def protected():
+    if request.method == "POST":
+        # Validate the CAPTCHA response
+        if captcha.is_recaptcha_valid():    # Or use is_hcaptcha_valid(), is_turnstile_valid(), etc.
+            return "Success!"
+    return render_template("form.html")
+```
+
+In your templates, you can easily embed any supported CAPTCHA:
+
+```html
+<!-- Templates automatically get access to CAPTCHA embeds -->
+<form method="POST">
+    {{ recaptcha|safe }}           <!-- For Google reCAPTCHA -->
+    {{ hcaptcha|safe }}           <!-- For hCaptcha -->
+    {{ turnstile|safe }}         <!-- For Cloudflare Turnstile -->
+    {{ friendly|safe }}          <!-- For Friendly Captcha -->
+    {{ altcha|safe }}            <!-- For Altcha (with default hardness) -->
+    {{ altcha1|safe }}           <!-- For Altcha (with hardness level 1-5) -->
+    <button type="submit">Submit</button>
+</form>
+```
+
+The CAPTCHA integration features:
+- Automatic dark/light theme detection
+- Multiple CAPTCHA provider support
+- Customizable difficulty levels for Altcha
+- Easy validation methods
+- Automatic template context integration
+
 ### Error Handling
 
 Flask-Humanify provides a clean error handling system:
