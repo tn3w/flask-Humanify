@@ -4,7 +4,7 @@ Flask-Humanify
 A Flask extension that protects against bots and DDoS attacks.
 """
 
-__version__ = "0.2.8"
+__version__ = "0.2.8.1"
 
 from . import utils
 from .humanify import Humanify

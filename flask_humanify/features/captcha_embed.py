@@ -275,9 +275,7 @@ class CaptchaEmbed:
         if not site_key:
             site_key = self.kwargs.get(f"{captcha_type}_site_key")
         if not site_key:
-            raise ValueError(
-                f"No site key provided for CAPTCHA type: {captcha_type}"
-            )
+            raise ValueError(f"No site key provided for CAPTCHA type: {captcha_type}")
         return self._get_standard_embed(captcha_type, site_key)
 
     def _get_standard_embed(self, captcha_type: str, site_key: str) -> str:

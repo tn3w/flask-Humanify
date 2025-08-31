@@ -98,7 +98,7 @@ humanify = Humanify(app)
 
 ### Rate Limiting
 
-Flask-Humanify includes a rate limiting feature to protect your application from excessive requests:
+Flask-Humanify includes a powerful rate limiting feature to protect your application from excessive requests:
 
 ```python
 from flask import Flask
@@ -106,19 +106,79 @@ from flask_humanify import Humanify, RateLimiter
 
 app = Flask(__name__)
 humanify = Humanify(app)
-# Default: 10 requests per 10 seconds
+
+# Initialize with default limits (10 requests per 10 seconds)
 rate_limiter = RateLimiter(app)
 
-# Or customize rate limits
-rate_limiter = RateLimiter(app, max_requests=20, time_window=30)
+# Or use human-readable limit strings
+rate_limiter = RateLimiter(app, default_limit="100/day")
+
+# Configure client tracking (defaults to IP-based)
+rate_limiter = RateLimiter(
+    app,
+    default_limit="10/minute",
+    use_client_id=True,     # Use secure client IDs instead of IPs
+    behind_proxy=True       # Enable if behind a proxy/load balancer
+)
 ```
 
-The rate limiter will automatically:
+#### Route-Specific Rate Limits
 
-- Track requests by IP address
-- Hash IPs for privacy
-- Redirect to a rate-limited page when limits are exceeded
-- Ignore rate limits for special pages like the rate-limited and access-denied pages
+You can set different rate limits for specific routes or patterns:
+
+```python
+# Using decorator syntax
+@app.route("/api/data")
+@rate_limiter.limit("5/minute")  # Limit specific route
+def get_data():
+    return "data"
+
+# Using pattern matching
+rate_limiter.set_route_limit("/api/*", "100/hour")      # All API routes
+rate_limiter.set_route_limit("/admin/<id>", "5/minute") # Admin routes
+
+# Exempt routes from rate limiting
+@app.route("/health")
+@rate_limiter.exempt
+def health_check():
+    return "OK"
+```
+
+#### Advanced Usage
+
+The rate limiter provides methods for managing and monitoring rate limits:
+
+```python
+# Reset rate limits for a client
+rate_limiter.reset_client("client_id")                  # Reset all routes
+rate_limiter.reset_client("client_id", "/api/data:GET") # Reset specific route
+
+# Get client statistics
+stats = rate_limiter.get_client_stats("client_id")
+"""
+Returns:
+{
+    "route:method": {
+        "current_requests": 5,
+        "next_reset": 1629123456.78
+    }
+}
+"""
+
+# Check rate limits programmatically
+if rate_limiter.is_rate_limited():
+    return "Too many requests!"
+```
+
+Features:
+
+- Flexible rate limit formats: "10/second", "5 per minute", "100/day"
+- Route-specific rate limits using decorators or patterns
+- Client tracking via IPs or secure client IDs
+- Proxy support with X-Forwarded-For headers
+- Route exemptions for health checks and critical endpoints
+- Built-in rate limit monitoring and management
+- Automatic rate limit page with return URL
 
 ### CAPTCHA Integration
 
@@ -160,17 +220,24 @@ In your templates, you can easily embed any supported CAPTCHA:
 ```html
 <!-- Templates automatically get access to CAPTCHA embeds -->
 <form method="POST">
-    {{ recaptcha|safe }}           <!-- For Google reCAPTCHA -->
-    {{ hcaptcha|safe }}           <!-- For hCaptcha -->
-    {{ turnstile|safe }}         <!-- For Cloudflare Turnstile -->
-    {{ friendly|safe }}          <!-- For Friendly Captcha -->
-    {{ altcha|safe }}            <!-- For Altcha (with default hardness) -->
-    {{ altcha1|safe }}           <!-- For Altcha (with hardness level 1-5) -->
+    {{ recaptcha|safe }}
+    <!-- For Google reCAPTCHA -->
+    {{ hcaptcha|safe }}
+    <!-- For hCaptcha -->
+    {{ turnstile|safe }}
+    <!-- For Cloudflare Turnstile -->
+    {{ friendly|safe }}
+    <!-- For Friendly Captcha -->
+    {{ altcha|safe }}
+    <!-- For Altcha (with default hardness) -->
+    {{ altcha1|safe }}
+    <!-- For Altcha (with hardness level 1-5) -->
     <button type="submit">Submit</button>
 </form>
 ```
 
 The CAPTCHA integration features:
+
 - Automatic dark/light theme detection
 - Multiple CAPTCHA provider support
 - Customizable difficulty levels for Altcha
