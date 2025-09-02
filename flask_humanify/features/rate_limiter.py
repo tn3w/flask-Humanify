@@ -237,7 +237,10 @@ class RateLimiter:
             route_pattern: Route pattern (e.g., "/api/*", "/users/<int:id>")
             limit_string: Rate limit string (e.g., "10/minute")
         """
-        if route_pattern.startswith("/humanify/rate_limited") or route_pattern == "/humanify/*":
+        if (
+            route_pattern.startswith("/humanify/rate_limited")
+            or route_pattern == "/humanify/*"
+        ):
             return
 
         max_requests, time_window = parse_limit_string(limit_string)

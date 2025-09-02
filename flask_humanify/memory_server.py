@@ -435,14 +435,16 @@ class MemoryServer:
         self.failed_attempts[ip_hash] = (now, count)
         return count
 
-    def is_limited(self, ip_hash: str) -> bool:
+    def get_failed_attempts(self, ip_hash: str) -> int:
         """Check if the IP hash has reached the failed attempts limit."""
         cutoff = datetime.now() - timedelta(hours=1)
-        return (
-            ip_hash in self.failed_attempts
-            and self.failed_attempts[ip_hash][0] > cutoff
-            and self.failed_attempts[ip_hash][1] >= 3
-        )
+        if (
+            not ip_hash in self.failed_attempts
+            or not self.failed_attempts[ip_hash][0] > cutoff
+        ):
+            return 0
+
+        return self.failed_attempts[ip_hash][1]
 
     def _handle_client(self, client: socket.socket, addr: Tuple[str, int]) -> None:
         """Handle client connection and queries with better error handling."""
@@ -477,12 +479,12 @@ class MemoryServer:
                 response = ""
 
                 try:
-                    if data.startswith("CHECK_LIMIT:"):
-                        ip_hash = data[12:].strip()
+                    if data.startswith("GET_FAILED_ATTEMPTS:"):
+                        ip_hash = data[20:].strip()
                         if ip_hash:
-                            response = str(self.is_limited(ip_hash)).lower()
+                            response = str(self.get_failed_attempts(ip_hash))
                         else:
-                            response = "false"
+                            response = "0"
                     elif data.startswith("FAILED_ATTEMPT:"):
                         ip_hash = data[15:].strip()
                         if ip_hash:
@@ -737,9 +739,14 @@ class MemoryClient:
 
         return ""
 
-    def is_attempt_limit_reached(self, ip_hash: str) -> bool:
+    def is_attempt_limit_reached(self, ip_hash: str, limit: int = 3) -> bool:
         """Check if the IP hash has reached the failed attempts limit."""
-        return self._send_recv(f"CHECK_LIMIT:{ip_hash}") == "true"
+        failed_attempts = self._send_recv(f"GET_FAILED_ATTEMPTS:{ip_hash}")
+        print("Failed attempts response:", failed_attempts)
+        try:
+            return int(failed_attempts) >= limit
+        except (ValueError, TypeError):
+            return False
 
     def record_failed_attempt(self, ip_hash: str) -> int:
         """Record a failed captcha attempt for a hashed IP."""

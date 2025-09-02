@@ -152,6 +152,7 @@ class Humanify:
         challenge_type: str = "one_click",
         image_dataset: Optional[str] = "ai_dogs",
         audio_dataset: Optional[str] = None,
+        retrys: int = 3,
         behind_proxy: bool = True,
         use_client_id: bool = False,
     ) -> None:
@@ -159,6 +160,7 @@ class Humanify:
         self.challenge_type = challenge_type
         self.image_dataset = image_dataset
         self.audio_dataset = audio_dataset
+        self.retrys = retrys + 1
         self.behind_proxy = behind_proxy
         self.use_client_id = use_client_id
         if app is not None:
@@ -451,6 +453,18 @@ class Humanify:
         return client_ip
 
     @property
+    def client_id(self) -> str:
+        """Get the client ID from cookies."""
+        if hasattr(g, "humanify_client_id"):
+            return g.humanify_client_id
+
+        client_id = get_or_create_client_id(
+            request, self.client_ip, self._secret_key, self.use_client_id
+        )
+        g.humanify_client_id = client_id
+        return client_id
+
+    @property
     def check_result(self) -> HumanifyResult:
         """
         Check if the IP is a bot.
@@ -510,11 +524,7 @@ class Humanify:
 
     def _check_attempt_limit(self) -> Optional[Response]:
         """Check if client has reached attempt limit, return deny_access response if true."""
-        if self.memory_client.is_attempt_limit_reached(
-            get_or_create_client_id(
-                request, self.client_ip, self._secret_key, self.use_client_id
-            )
-        ):
+        if self.memory_client.is_attempt_limit_reached(self.client_id, self.retrys):
             return self.deny_access()
         return None
 
@@ -657,13 +667,9 @@ class Humanify:
         if self.has_valid_clearance_token:
             return redirect(return_url)
 
-        failed_attempts = self.memory_client.record_failed_attempt(
-            get_or_create_client_id(
-                request, self.client_ip, self._secret_key, self.use_client_id
-            )
-        )
-        if failed_attempts >= 3:
-            return self.deny_access()
+        limit_response = self._check_attempt_limit()
+        if limit_response:
+            return limit_response
 
         captcha_data = request.form.get("captcha_data", "")
         if not captcha_data:
@@ -698,6 +704,7 @@ class Humanify:
 
         verify_function = verify_functions[self.challenge_type]
         if not verify_function(decrypted_data):
+            self.memory_client.record_failed_attempt(self.client_id)
             return redirect(
                 url_for(
                     "humanify.challenge",
@@ -757,6 +764,7 @@ class Humanify:
 
         audio_response = request.form.get("audio_response", "").lower().strip()
         if not audio_response or audio_response != correct_chars:
+            self.memory_client.record_failed_attempt(self.client_id)
             return redirect(
                 url_for(
                     "humanify.audio_challenge",
