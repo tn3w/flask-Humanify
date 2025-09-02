@@ -742,7 +742,6 @@ class MemoryClient:
     def is_attempt_limit_reached(self, ip_hash: str, limit: int = 3) -> bool:
         """Check if the IP hash has reached the failed attempts limit."""
         failed_attempts = self._send_recv(f"GET_FAILED_ATTEMPTS:{ip_hash}")
-        print("Failed attempts response:", failed_attempts)
         try:
             return int(failed_attempts) >= limit
         except (ValueError, TypeError):

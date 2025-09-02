@@ -160,7 +160,7 @@ class Humanify:
         self.challenge_type = challenge_type
         self.image_dataset = image_dataset
         self.audio_dataset = audio_dataset
-        self.retrys = retrys + 1
+        self.retrys = retrys
         self.behind_proxy = behind_proxy
         self.use_client_id = use_client_id
         if app is not None:
