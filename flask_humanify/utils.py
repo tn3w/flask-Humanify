@@ -23,7 +23,7 @@ from scipy.io.wavfile import write as write_wav
 logger = logging.getLogger(__name__)
 
 
-def get_crawler_name(user_agent):
+def get_crawler_name(user_agent: str) -> Optional[str]:
     """
     Extracts crawler name from user agent string using regex
     Assumes the input is already confirmed to be a crawler user agent

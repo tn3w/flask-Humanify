@@ -64,7 +64,20 @@ IMAGE_CAPTCHA_MAPPING = {
 
 AUDIO_CAPTCHA_CONFIG = {
     "num_chars": 6,
-    "language": "en",
+    "languages": [
+        "es",
+        "ko",
+        "ja",
+        "hi",
+        "zh-CN",
+        "pt",
+        "it",
+        "de",
+        "ru",
+        "en",
+        "ar",
+        "fr",
+    ],
 }
 
 logger = logging.getLogger(__name__)
@@ -153,6 +166,7 @@ class Humanify:
         image_dataset: Optional[str] = "ai_dogs",
         audio_dataset: Optional[str] = None,
         retrys: int = 3,
+        hardness: int = 1,
         behind_proxy: bool = True,
         use_client_id: bool = False,
     ) -> None:
@@ -161,6 +175,7 @@ class Humanify:
         self.image_dataset = image_dataset
         self.audio_dataset = audio_dataset
         self.retrys = retrys
+        self.hardness = 3
         self.behind_proxy = behind_proxy
         self.use_client_id = use_client_id
         if app is not None:
@@ -580,8 +595,8 @@ class Humanify:
                     img_bytes,
                     is_small=not (i == 0 and use_preview_image),
                     hardness=random.randint(
-                        captcha_config["hardness_range"][0],
-                        captcha_config["hardness_range"][1],
+                        max(captcha_config["hardness_range"][0] + self.hardness - 1, 1),
+                        max(captcha_config["hardness_range"][1] + self.hardness - 1, 5),
                     ),
                 )
                 processed_images.append(image_bytes_to_data_url(distorted_img_bytes))
@@ -626,8 +641,9 @@ class Humanify:
         """
         Render the audio challenge.
         """
-        num_chars = AUDIO_CAPTCHA_CONFIG["num_chars"]
-        language = AUDIO_CAPTCHA_CONFIG["language"]
+        num_chars = AUDIO_CAPTCHA_CONFIG["num_chars"] + self.hardness - 1
+        languages = AUDIO_CAPTCHA_CONFIG["languages"]
+        language = request.accept_languages.best_match(languages) or "en"
 
         audio_files, correct_chars = self.memory_client.get_captcha_audio(
             dataset=self.audio_dataset, chars=num_chars, lang=language

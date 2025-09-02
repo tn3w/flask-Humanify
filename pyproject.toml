@@ -1,6 +1,6 @@
 [project]
 name = "flask-Humanify"
-version = "0.2.8.4"
+version = "0.2.8.5"
 description = "Protect against bots and DDoS attacks"
 readme = "README.md"
 authors = [
