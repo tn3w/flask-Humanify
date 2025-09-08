@@ -22,6 +22,6 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add flask_humanify/datatsets/ipset.json
+          git add flask_humanify/datasets/ipset.json
           git commit -m "Update ipset.json $(date) [skip ci]" || echo "No changes to commit"
           git push
