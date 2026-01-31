@@ -2,38 +2,101 @@ import base64
 import hashlib
 import hmac
 import io
-import re
 import logging
 import math
-import random
+import re
 import secrets
 import time
-from typing import List, Optional
 from urllib.parse import urlparse
 
+import cv2
+import numpy as np
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from flask import Request, g
 from netaddr import AddrFormatError, IPAddress
-import cv2
-import numpy as np
 from pydub import AudioSegment
 from scipy.io.wavfile import write as write_wav
 
-
 logger = logging.getLogger(__name__)
 
+WAVE_SAMPLE_RATE = 44100
+audio_cache = {}
+secure_random = secrets.SystemRandom()
 
-def get_crawler_name(user_agent: str) -> Optional[str]:
-    """
-    Extracts crawler name from user agent string using regex
-    Assumes the input is already confirmed to be a crawler user agent
 
-    Args:
-        user_agent (str): The crawler user agent string
+def generate_csrf_token(request: Request, secret_key: bytes) -> str:
+    cookie_value = request.cookies.get("csrf_token", "")
+    csrf_ttl = 1800
 
-    Returns:
-        str or None: The crawler name or None if not found
-    """
+    if cookie_value and len(cookie_value) == 117:
+        stored_token = cookie_value[:64]
+        timestamp = cookie_value[64:74]
+        signature = cookie_value[74:]
+
+        data = f"{stored_token}{timestamp}"
+        if validate_signature(data, signature, secret_key):
+            try:
+                token_time = int(timestamp)
+                current_time = int(time.time())
+                if token_time <= current_time and token_time + csrf_ttl >= current_time:
+                    return stored_token
+            except ValueError:
+                pass
+
+    token = secrets.token_hex(32)
+    timestamp = str(int(time.time())).zfill(10)
+    data = f"{token}{timestamp}"
+    signature = generate_signature(data, secret_key)
+    signed_token = f"{data}{signature}"
+    g.humanify_csrf_cookie = signed_token
+    return token
+
+
+def validate_csrf_token(
+    request: Request,
+    token: str,
+    secret_key: bytes,
+    ttl: int = 1800,
+) -> bool:
+    if not token:
+        return False
+
+    cookie_value = request.cookies.get("csrf_token", "")
+    if not cookie_value:
+        return False
+
+    expected_length = 117
+    if len(cookie_value) != expected_length:
+        return False
+
+    stored_token = cookie_value[:64]
+    timestamp = cookie_value[64:74]
+    signature = cookie_value[74:]
+
+    data = f"{stored_token}{timestamp}"
+    if not validate_signature(data, signature, secret_key):
+        return False
+
+    try:
+        token_time = int(timestamp)
+        current_time = int(time.time())
+        if token_time > current_time or token_time + ttl < current_time:
+            return False
+    except ValueError:
+        return False
+
+    return hmac.compare_digest(token, stored_token)
+
+
+def verify_request_csrf(request: Request, secret_key: bytes) -> bool:
+    if request.method not in ["POST", "PUT", "DELETE", "PATCH"]:
+        return True
+
+    token = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
+    return validate_csrf_token(request, token or "", secret_key)
+
+
+def get_crawler_name(user_agent):
     if not user_agent:
         return None
 
@@ -50,8 +113,7 @@ def get_crawler_name(user_agent: str) -> Optional[str]:
     return match.group(1) or match.group(2) if match else None
 
 
-def is_valid_routable_ip(ip: str) -> bool:
-    """Check if the IP address is valid and routable."""
+def is_valid_routable_ip(ip):
     try:
         ip_obj = IPAddress(ip)
 
@@ -70,46 +132,53 @@ def is_valid_routable_ip(ip: str) -> bool:
         return False
 
 
-def get_return_url(request: Request) -> str:
-    """Get the return URL from the request."""
-    return_url = request.args.get(
-        "return_url", request.form.get("return_url", "")
+def get_next_url(request):
+    next_url = request.args.get(
+        "next",
+        request.form.get("next", ""),
     ).strip()
-    if not return_url:
+
+    if not next_url:
         return "/"
 
-    parsed_url = urlparse(return_url)
+    if len(next_url) > 400:
+        return "/"
+
+    if not next_url.startswith("/"):
+        return "/"
+
+    if next_url.startswith(("//", "/\\", "/\\")):
+        return "/"
+
+    parsed_url = urlparse(next_url)
     if parsed_url.netloc or parsed_url.scheme:
         return "/"
 
-    return return_url.rstrip("?")
+    return next_url.rstrip("?")
 
 
-def generate_random_token(length: int = 32) -> str:
-    """Generate a random token using URL-safe base64 character set."""
-    url_safe_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+def generate_random_token(length=32):
+    url_safe_chars = (
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ" "abcdefghijklmnopqrstuvwxyz" "0123456789-_"
+    )
     return "".join(secrets.choice(url_safe_chars) for _ in range(length))
 
 
-def generate_signature(data: str, key: bytes) -> str:
-    """Generate a signature for the given data using the given key."""
+def generate_signature(data, key):
     hmac_digest = hmac.new(key, data.encode("utf-8"), hashlib.sha256).digest()
     return base64.urlsafe_b64encode(hmac_digest).decode("utf-8").rstrip("=")
 
 
-def validate_signature(data: str, signature: str, key: bytes) -> bool:
-    """Validate the signature for the given data using the given key."""
+def validate_signature(data, signature, key):
     expected_signature = generate_signature(data, key)
     return hmac.compare_digest(expected_signature, signature)
 
 
-def generate_user_hash(ip: str, user_agent: str) -> str:
-    """Generate a user hash for the given ip and user agent."""
+def generate_user_hash(ip, user_agent):
     return hashlib.sha256(f"{ip}{user_agent}".encode("utf-8")).hexdigest()
 
 
-def generate_clearance_token(user_hash: str, key: bytes) -> str:
-    """Generate a clearance token for the given user hash."""
+def generate_clearance_token(user_hash, key):
     nonce = generate_random_token(32)
     timestamp = str(int(time.time())).zfill(10)
     data = f"{nonce}{timestamp}{user_hash}"
@@ -117,30 +186,26 @@ def generate_clearance_token(user_hash: str, key: bytes) -> str:
     return f"{data}{signature}"
 
 
-def generate_client_id_token(secret_key: bytes, client_id: str) -> str:
-    """Generate a signed client ID token."""
+def generate_client_id_token(secret_key, client_id):
     h = hmac.new(secret_key, client_id.encode(), hashlib.sha256)
     return f"{client_id}:{h.hexdigest()}"
 
 
-def verify_client_id_token(secret_key, token: str) -> Optional[str]:
-    """Verify a signed client ID token and return the client ID if valid."""
+def verify_client_id_token(secret_key, token):
     if not token or ":" not in token:
         return None
     client_id, signature = token.rsplit(":", 1)
-    expected = hmac.new(secret_key, client_id.encode(), hashlib.sha256).hexdigest()
+    expected = hmac.new(
+        secret_key,
+        client_id.encode(),
+        hashlib.sha256,
+    ).hexdigest()
     if hmac.compare_digest(signature, expected):
         return client_id
     return None
 
 
-def get_or_create_client_id(
-    request: Request,
-    client_ip: Optional[str],
-    secret_key: Optional[bytes],
-    use_client_id: bool = False,
-) -> str:
-    """Get or create a client identifier."""
+def get_or_create_client_id(request, client_ip, secret_key, use_client_id=False):
     if not use_client_id:
         if not client_ip:
             client_ip = "127.0.0.1"
@@ -160,12 +225,15 @@ def get_or_create_client_id(
     return new_id
 
 
-def validate_clearance_token(
-    token: str, key: bytes, user_hash: str, ttl: int = 14400
-) -> bool:
-    """Validate the clearance token."""
+def validate_clearance_token(token, key, user_hash, ttl=7200):
     try:
-        if len(token) < 85:
+        expected_length = 149
+        if not isinstance(token, str):
+            return False
+
+        if not hmac.compare_digest(
+            str(len(token)).zfill(10), str(expected_length).zfill(10)
+        ):
             return False
 
         signature_length = 43
@@ -175,24 +243,26 @@ def validate_clearance_token(
         token_user_hash = token[42:106]
         signature = token[-signature_length:]
 
-        if token_user_hash != user_hash:
+        if not hmac.compare_digest(token_user_hash, user_hash):
             return False
 
         data = f"{nonce}{timestamp}{user_hash}"
         if not validate_signature(data, signature, key):
             return False
 
-        if int(timestamp) + ttl < int(time.time()):
+        current_time = int(time.time())
+        token_time = int(timestamp)
+
+        if token_time > current_time or token_time + ttl < current_time:
             return False
 
         return True
-    except Exception as e:
-        logger.error("Token validation error: %s", str(e))
+    except Exception:
+        logger.error("Token validation error")
         return False
 
 
-def encrypt_data(data: str, key: bytes) -> str:
-    """Encrypt data using AES-GCM."""
+def encrypt_data(data, key):
     aesgcm = AESGCM(key[:32])
     iv = secrets.token_bytes(12)
     ciphertext = aesgcm.encrypt(iv, data.encode("utf-8"), None)
@@ -200,8 +270,7 @@ def encrypt_data(data: str, key: bytes) -> str:
     return base64.urlsafe_b64encode(encrypted).decode("utf-8")
 
 
-def decrypt_data(encrypted_data: str, key: bytes) -> Optional[str]:
-    """Decrypt data encrypted with AES-GCM."""
+def decrypt_data(encrypted_data, key):
     try:
         encrypted = base64.urlsafe_b64decode(encrypted_data)
         iv = encrypted[:12]
@@ -214,8 +283,7 @@ def decrypt_data(encrypted_data: str, key: bytes) -> Optional[str]:
         return None
 
 
-def generate_captcha_token(user_hash: str, correct_indexes: str, key: bytes) -> str:
-    """Generate a captcha verification token."""
+def generate_captcha_token(user_hash, correct_indexes, key):
     nonce = generate_random_token(32)
     timestamp = str(int(time.time())).zfill(10)
 
@@ -226,18 +294,23 @@ def generate_captcha_token(user_hash: str, correct_indexes: str, key: bytes) -> 
 
 
 def validate_captcha_token(
-    token: str,
-    key: bytes,
-    user_hash: str,
-    ttl: int = 600,
-    valid_lengths: Optional[List[int]] = None,
-) -> Optional[str]:
-    """Validate the captcha token and return the correct indexes if valid."""
+    token,
+    key,
+    user_hash,
+    ttl=600,
+    valid_lengths=None,
+):
     try:
         if valid_lengths is None:
             valid_lengths = [189, 193]
 
-        if len(token) not in valid_lengths:
+        token_length = len(token) if isinstance(token, str) else 0
+        is_valid_length = any(
+            hmac.compare_digest(str(token_length).zfill(10), str(vl).zfill(10))
+            for vl in valid_lengths
+        )
+
+        if not is_valid_length:
             return None
 
         nonce = token[:32]
@@ -246,7 +319,7 @@ def validate_captcha_token(
         encrypted_answer = token[106:-43]
         signature = token[-43:]
 
-        if token_user_hash != user_hash:
+        if not hmac.compare_digest(token_user_hash, user_hash):
             return None
 
         data = f"{nonce}{timestamp}{token_user_hash}{encrypted_answer}"
@@ -260,18 +333,13 @@ def validate_captcha_token(
         correct_indexes = decrypt_data(encrypted_answer, key)
         return correct_indexes
 
-    except Exception as e:
-        logger.error("Token validation error: %s", str(e))
+    except Exception:
+        logger.error("Token validation error")
         return None
 
 
-def manipulate_image_bytes(
-    image_data: bytes, is_small: bool = False, hardness: int = 1
-) -> bytes:
-    """Manipulates an image represented by bytes to create a distorted version."""
-    # pylint: disable=no-member
-
-    hardness = min(max(1, hardness), 4)
+def manipulate_image_bytes(image_data, is_small=False, hardness=1):
+    hardness = min(max(1, hardness), 5)
 
     img = cv2.imdecode(np.frombuffer(image_data, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
@@ -294,49 +362,77 @@ def manipulate_image_bytes(
 
     noise_max = max(1, 1 + hardness // 2)
     noise_pattern = np.random.randint(
-        0, noise_max, size=(size, size, 3), dtype=np.uint8
+        0,
+        noise_max,
+        size=(size, size, 3),
+        dtype=np.uint8,
     )
     img = cv2.add(img, noise_pattern)
 
-    num_dots = np.random.randint(5 + 5 * hardness, 10 + 10 * hardness + 1)
-    dot_coords = np.random.randint(0, [size, size], size=(num_dots, 2))
+    num_dots = secure_random.randint(5 + 5 * hardness, 10 + 10 * hardness)
+    dot_coords = np.array(
+        [
+            [secure_random.randint(0, size - 1), secure_random.randint(0, size - 1)]
+            for _ in range(num_dots)
+        ]
+    )
 
     dot_intensity = 0.05 + hardness * 0.05
     rand_max = max(1, 10 * hardness)
-    colors = np.random.randint(0, rand_max, size=(num_dots, 3)) + np.array(
-        [img[coord[1], coord[0]] for coord in dot_coords]
-    ) * (1 - dot_intensity)
+    colors = np.array(
+        [
+            [secure_random.randint(0, rand_max - 1) for _ in range(3)]
+            for _ in range(num_dots)
+        ]
+    ) + np.array([img[coord[1], coord[0]] for coord in dot_coords]) * (
+        1 - dot_intensity
+    )
     colors = np.clip(colors, 0, 255).astype(np.uint8)
 
     for (x, y), color in zip(dot_coords, colors):
         img[y, x] = color
 
-    num_lines = np.random.randint(2 * hardness, 5 * hardness + 1)
-    start_coords = np.random.randint(0, [size, size], size=(num_lines, 2))
-    end_coords = np.random.randint(0, [size, size], size=(num_lines, 2))
+    num_lines = secure_random.randint(2 * hardness, 5 * hardness)
+    start_coords = np.array(
+        [
+            [secure_random.randint(0, size - 1), secure_random.randint(0, size - 1)]
+            for _ in range(num_lines)
+        ]
+    )
+    end_coords = np.array(
+        [
+            [secure_random.randint(0, size - 1), secure_random.randint(0, size - 1)]
+            for _ in range(num_lines)
+        ]
+    )
 
     line_intensity = max(4, 3 * hardness)
-    colors = np.random.randint(3, line_intensity, size=(num_lines, 3))
+    colors = np.array(
+        [
+            [secure_random.randint(3, line_intensity - 1) for _ in range(3)]
+            for _ in range(num_lines)
+        ]
+    )
 
     for (start, end), color in zip(zip(start_coords, end_coords), colors):
         cv2.line(img, tuple(start), tuple(end), color.tolist(), 1)
 
     for _ in range(hardness):
-        x = np.random.randint(0, size)
-        y = np.random.randint(0, size)
-        length = np.random.randint(5 + 3 * hardness, 10 + 5 * hardness + 1)
-        angle = np.random.randint(0, 360)
+        x = secure_random.randint(0, size - 1)
+        y = secure_random.randint(0, size - 1)
+        length = secure_random.randint(5 + 3 * hardness, 10 + 5 * hardness)
+        angle = secure_random.randint(0, 359)
         text_max = max(3, 2 + hardness)
-        text_color = np.random.randint(1, text_max, 3).tolist()
+        text_color = [secure_random.randint(1, text_max - 1) for _ in range(3)]
 
         end_x = int(x + length * np.cos(np.radians(angle)))
         end_y = int(y + length * np.sin(np.radians(angle)))
         cv2.line(img, (x, y), (end_x, end_y), text_color, 1)
 
     for _ in range(1 + hardness // 2):
-        patch_size = np.random.randint(4 + hardness, 6 + 3 * hardness + 1)
-        x = np.random.randint(0, size - patch_size)
-        y = np.random.randint(0, size - patch_size)
+        patch_size = secure_random.randint(4 + hardness, 6 + 3 * hardness)
+        x = secure_random.randint(0, size - patch_size)
+        y = secure_random.randint(0, size - patch_size)
 
         patch = np.zeros((patch_size, patch_size, 3), dtype=np.uint8)
         for i in range(0, patch_size, 2):
@@ -344,18 +440,32 @@ def manipulate_image_bytes(
                 if (i + j) % 4 == 0:
                     patch_color_max = max(2, 1 + hardness)
                     patch[i : i + 2, j : j + 2] = [
-                        np.random.randint(1, patch_color_max)
+                        secure_random.randint(1, patch_color_max - 1)
                     ] * 3
 
         patch_opacity = 0.03 + 0.02 * hardness
         roi = img[y : y + patch_size, x : x + patch_size]
         img[y : y + patch_size, x : x + patch_size] = cv2.addWeighted(
-            roi, 1 - patch_opacity, patch, patch_opacity, 0
+            roi,
+            1 - patch_opacity,
+            patch,
+            patch_opacity,
+            0,
         )
 
     max_shift = hardness
-    x_shifts = np.random.randint(-max_shift, max_shift + 1, size=(size, size))
-    y_shifts = np.random.randint(-max_shift, max_shift + 1, size=(size, size))
+    x_shifts = np.array(
+        [
+            [secure_random.randint(-max_shift, max_shift) for _ in range(size)]
+            for _ in range(size)
+        ]
+    )
+    y_shifts = np.array(
+        [
+            [secure_random.randint(-max_shift, max_shift) for _ in range(size)]
+            for _ in range(size)
+        ]
+    )
 
     saturation_factor = 1 + hardness * 0.05
     value_factor = 1 - hardness * 0.03
@@ -366,21 +476,33 @@ def manipulate_image_bytes(
     map_y = (map_y + y_shifts) % size
 
     shifted_img = cv2.remap(
-        img, map_x.astype(np.float32), map_y.astype(np.float32), cv2.INTER_LINEAR
+        img,
+        map_x.astype(np.float32),
+        map_y.astype(np.float32),
+        cv2.INTER_LINEAR,
     )
     shifted_img_hsv = cv2.cvtColor(shifted_img, cv2.COLOR_BGR2HSV)
 
     shifted_img_hsv[..., 1] = np.clip(
-        shifted_img_hsv[..., 1] * saturation_factor, 0, 255
+        shifted_img_hsv[..., 1] * saturation_factor,
+        0,
+        255,
     )
-    shifted_img_hsv[..., 2] = np.clip(shifted_img_hsv[..., 2] * value_factor, 0, 255)
+    shifted_img_hsv[..., 2] = np.clip(
+        shifted_img_hsv[..., 2] * value_factor,
+        0,
+        255,
+    )
 
     shifted_img = cv2.cvtColor(shifted_img_hsv, cv2.COLOR_HSV2BGR)
     shifted_img = cv2.GaussianBlur(shifted_img, (5, 5), blur_factor)
 
     noise_high = max(1, 1 + hardness // 3)
     high_freq_noise = np.random.randint(
-        0, noise_high, size=shifted_img.shape, dtype=np.uint8
+        0,
+        noise_high,
+        size=shifted_img.shape,
+        dtype=np.uint8,
     )
     shifted_img = cv2.add(shifted_img, high_freq_noise)
 
@@ -392,26 +514,17 @@ def manipulate_image_bytes(
     return output_bytes.tobytes()
 
 
-def image_bytes_to_data_url(image_bytes: bytes, image_format: str = "png") -> str:
-    """Convert image bytes to a data URL."""
+def image_bytes_to_data_url(image_bytes, image_format="png"):
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
     return f"data:image/{image_format};base64,{b64_image}"
 
 
-def audio_bytes_to_data_url(audio_bytes: bytes, audio_format: str = "mp3") -> str:
-    """Convert audio bytes to a data URL."""
+def audio_bytes_to_data_url(audio_bytes, audio_format="mp3"):
     b64_audio = base64.b64encode(audio_bytes).decode("utf-8")
     return f"data:audio/{audio_format};base64,{b64_audio}"
 
 
-# Audio processing functions
-
-WAVE_SAMPLE_RATE = 44100  # Hz
-audio_cache = {}
-
-
 def numpy_to_audio_segment(samples, sample_rate=44100):
-    """Convert numpy array directly to AudioSegment without temporary files."""
     try:
         samples = samples.astype(np.int16)
         wav_io = io.BytesIO()
@@ -425,7 +538,6 @@ def numpy_to_audio_segment(samples, sample_rate=44100):
 
 
 def generate_sine_wave(freq, duration_ms, sample_rate=44100):
-    """Generate a sine wave at the specified frequency and duration."""
     cache_key = f"sine_{freq}_{duration_ms}_{sample_rate}"
     if cache_key in audio_cache:
         return audio_cache[cache_key]
@@ -441,7 +553,6 @@ def generate_sine_wave(freq, duration_ms, sample_rate=44100):
 
 
 def change_speed(audio_segment, speed=1.0):
-    """Change the speed of an AudioSegment."""
     if speed == 1.0:
         return audio_segment
 
@@ -452,7 +563,6 @@ def change_speed(audio_segment, speed=1.0):
 
 
 def change_volume(audio_segment, level=1.0):
-    """Change the volume of an AudioSegment."""
     if level == 1.0:
         return audio_segment
 
@@ -461,7 +571,6 @@ def change_volume(audio_segment, level=1.0):
 
 
 def create_silence(duration_ms):
-    """Create a silent AudioSegment."""
     try:
         return AudioSegment.silent(duration=duration_ms)
     except ImportError:
@@ -470,7 +579,6 @@ def create_silence(duration_ms):
 
 
 def create_noise(duration_ms, level=0.05, sample_rate=44100):
-    """Create white noise."""
     cache_key = f"noise_{duration_ms}_{level}_{sample_rate}"
     if cache_key in audio_cache:
         return audio_cache[cache_key]
@@ -487,11 +595,10 @@ def create_noise(duration_ms, level=0.05, sample_rate=44100):
 
 
 def mix_audio(audio1, audio2, position_ms=0):
-    """Mix two AudioSegments."""
     try:
         return audio1.overlay(audio2, position=position_ms)
-    except Exception as e:
-        logger.error("Audio overlay failed: %s", e)
+    except Exception:
+        logger.error("Audio overlay failed")
         try:
             if audio1.frame_rate != audio2.frame_rate:
                 audio2 = audio2.set_frame_rate(audio1.frame_rate)
@@ -501,22 +608,12 @@ def mix_audio(audio1, audio2, position_ms=0):
                 audio2 = audio2.set_sample_width(audio1.sample_width)
 
             return audio1.overlay(audio2, position=position_ms)
-        except Exception as e2:
-            logger.error("Second audio overlay attempt failed: %s", e2)
+        except Exception:
+            logger.error("Second audio overlay attempt failed")
             return audio1
 
 
 def batch_mix_audio(base_audio, segments_with_positions):
-    """
-    More efficient way to mix multiple audio segments with their positions.
-
-    Args:
-        base_audio: Base AudioSegment
-        segments_with_positions: List of tuples (segment, position_ms)
-
-    Returns:
-        Mixed AudioSegment
-    """
     result = base_audio
 
     segments_with_positions.sort(key=lambda x: x[1])
@@ -532,7 +629,6 @@ def batch_mix_audio(base_audio, segments_with_positions):
 
 
 def bytes_to_audio_segment(audio_bytes):
-    """Convert bytes directly to AudioSegment without temp files."""
     try:
         wav_io = io.BytesIO(audio_bytes)
         return AudioSegment.from_wav(wav_io)
@@ -542,15 +638,6 @@ def bytes_to_audio_segment(audio_bytes):
 
 
 def combine_audio_files(audio_files):
-    """
-    Combine a list of audio file bytes into a single audio file.
-
-    Args:
-        audio_files: List of audio file bytes
-
-    Returns:
-        Combined audio file bytes
-    """
     try:
         if not audio_files:
             logger.error("No audio files provided")
@@ -562,20 +649,20 @@ def combine_audio_files(audio_files):
             try:
                 segment = AudioSegment.from_wav(wav_io)
                 segments.append(segment)
-            except Exception as e:
-                logger.error("Error converting audio bytes to segment: %s", e)
+            except Exception:
+                logger.error("Error converting audio bytes to segment")
 
         if not segments:
             logger.error("No valid audio segments found")
             return None
 
-        result = create_silence(random.randint(200, 500))
+        result = create_silence(secure_random.randint(200, 500))
 
         for segment in segments:
             result += segment
-            result += create_silence(random.randint(300, 700))
+            result += create_silence(secure_random.randint(300, 700))
 
-        noise_level = random.uniform(0.01, 0.03)
+        noise_level = secure_random.uniform(0.01, 0.03)
         result = add_background_noise(result, noise_level)
 
         output_io = io.BytesIO()
@@ -589,6 +676,5 @@ def combine_audio_files(audio_files):
 
 
 def add_background_noise(audio_segment, noise_level=0.05):
-    """Add background noise to an AudioSegment."""
     noise = create_noise(len(audio_segment), level=noise_level)
     return mix_audio(audio_segment, noise)

@@ -187,15 +187,16 @@
                         autofocus
                     />
                 </div>
-                <input type="hidden" name="return_url" value="{{ return_url }}" />
+                <input type="hidden" name="next" value="{{ next }}" />
                 <input type="hidden" name="captcha_data" value="{{ captcha_data }}" />
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
                 <button type="submit" class="submit-button">Verify</button>
             </form>
 
             {% if image_challenge_available %}
             <a
                 class="image-challenge-link"
-                href="{{ url_for('humanify.challenge', return_url=return_url) }}"
+                href="{{ url_for('humanify.challenge', next=next) }}"
             >
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
                     <path

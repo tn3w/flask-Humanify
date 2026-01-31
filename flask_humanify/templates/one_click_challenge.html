@@ -172,8 +172,9 @@
             <div class="images-row">
                 {% for image in images %}
                 <form action="{{ url_for('humanify.verify') }}" method="POST">
-                    <input type="hidden" name="return_url" value="{{ return_url }}" />
+                    <input type="hidden" name="next" value="{{ next }}" />
                     <input type="hidden" name="captcha_data" value="{{ captcha_data }}" />
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
                     <button type="submit" class="image-button" name="{{ loop.index }}" value="1">
                         <img src="{{ image }}" alt="Selection image {{ loop.index }}" />
                     </button>
@@ -184,7 +185,7 @@
             {% if audio_challenge_available %}
             <a
                 class="audio-challenge-link"
-                href="{{ url_for('humanify.audio_challenge', return_url=return_url) }}"
+                href="{{ url_for('humanify.audio_challenge', next=next) }}"
             >
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
                     <path

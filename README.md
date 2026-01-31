@@ -12,7 +12,7 @@ app = Flask(__name__)
 humanify = Humanify(app, challenge_type="one_click", image_dataset="ai_dogs")
 
 # Register the middleware to deny access to bots
-humanify.register_middleware(action="challenge")
+humanify.register_middleware(app, action="challenge")
 
 @app.route("/")
 def index():
@@ -32,24 +32,28 @@ You can customize bot protection with advanced filtering rules:
 ```python
 # Protect specific endpoints with regex patterns
 humanify.register_middleware(
+    app,
     action="challenge",
     endpoint_patterns=["api.*", "admin.*"]  # Protect all API and admin endpoints
 )
 
 # Protect specific URL paths
 humanify.register_middleware(
+    app,
     action="deny_access",
     url_patterns=["/sensitive/*", "/admin/*"]  # Deny bot access to sensitive areas
 )
 
 # Exclude certain patterns from protection
 humanify.register_middleware(
+    app,
     endpoint_patterns=["api.*"],
     exclude_patterns=["api.public.*"]  # Don't protect public API endpoints
 )
 
 # Filter by request parameters
 humanify.register_middleware(
+    app,
     request_filters={
         "method": ["POST", "PUT", "DELETE"],  # Only protect write operations
         "args.admin": "true",                # Only when admin=true query parameter exists
@@ -58,18 +62,80 @@ humanify.register_middleware(
 )
 ```
 
-Not using the middleware:
+## Route-Level Protection with Decorators
+
+Flask-Humanify provides powerful decorators for fine-grained bot protection on specific routes:
+
+### `@require_human(action="challenge")`
+
+Protects a route by challenging suspected bots with a captcha.
 
 ```python
-@app.route("/")
-def index():
-    """
-    A route that is protected against bots and DDoS attacks.
-    """
-    if humanify.is_bot:
-        return humanify.challenge()
-    return "Hello, Human!"
+from flask_humanify import require_human
+
+@app.route("/protected")
+@require_human()
+def protected():
+    return "Only humans can access this"
+
+@app.route("/strict")
+@require_human(action="deny_access")
+def strict():
+    return "Bots are blocked without a challenge"
 ```
+
+**Parameters:**
+
+- `action` (str): Action to take when a bot is detected
+    - `"challenge"` (default): Show captcha challenge
+    - `"deny_access"`: Block access immediately
+
+### `@always_challenge`
+
+Forces all visitors (including humans) to solve a captcha before accessing the route.
+
+```python
+from flask_humanify import always_challenge
+
+@app.route("/sensitive")
+@always_challenge
+def sensitive():
+    return "Everyone must solve a captcha"
+```
+
+### `@block_bots`
+
+Immediately blocks all detected bots without showing a captcha challenge.
+
+```python
+from flask_humanify import block_bots
+
+@app.route("/no-bots")
+@block_bots
+def no_bots():
+    return "Bots cannot access this route"
+```
+
+### `@exempt_from_protection`
+
+Exempts a route from all Humanify protection, including middleware rules.
+
+```python
+from flask_humanify import exempt_from_protection
+
+@app.route("/public-api")
+@exempt_from_protection
+def public_api():
+    return {"data": "No bot protection on this endpoint"}
+```
+
+### Decorator Priority
+
+When both middleware and decorators are used:
+
+1. `@exempt_from_protection` - Highest priority, bypasses all protection
+2. Route-specific decorators - Override middleware settings for that route
+3. Middleware rules - Apply to routes without decorators
 
 ## Usage
 
@@ -81,18 +147,77 @@ Install the package with pip:
 pip install flask-humanify --upgrade
 ```
 
-Import the extension:
+#### Optional: Enhanced Security with re2
 
-```python
-from flask_humanify import Humanify
+For better performance and protection against ReDoS (Regular Expression Denial of Service) attacks, install the `google-re2` library:
+
+```bash
+pip install google-re2
 ```
 
-Add the extension to your Flask app:
+Flask-Humanify will automatically use `re2` if available, providing:
+- Guaranteed linear-time regex execution (no catastrophic backtracking)
+- Better performance with complex patterns
+- Enhanced security when using custom `endpoint_patterns`, `url_patterns`, or `request_filters`
+
+The library works without `re2`, but installing it is recommended for production environments.
+
+### Basic Setup
 
 ```python
+from flask import Flask
+from flask_humanify import Humanify
+
 app = Flask(__name__)
 humanify = Humanify(app)
 ```
+
+### Configuration Options
+
+Humanify can be configured with various options to customize bot detection and challenge behavior:
+
+```python
+humanify = Humanify(
+    app,
+    challenge_type="one_click",    # Challenge type: "grid" or "one_click"
+    image_dataset="ai_dogs",       # Image dataset: "ai_dogs", "animals", "characters", "keys"
+    audio_dataset=None,            # Enable audio challenges: "characters" or None
+    retrys=3,                      # Maximum failed attempts before blocking
+    hardness=1,                    # Challenge difficulty: 1 (easy) to 5 (hard)
+    behind_proxy=False,            # Set True if behind a proxy/load balancer
+    use_client_id=False            # Use secure client IDs instead of IP addresses
+)
+```
+
+**Configuration Parameters:**
+
+- `challenge_type`: Type of visual challenge
+    - `"one_click"`: Select one matching image from a grid (easier, faster)
+    - `"grid"`: Select multiple matching images from a 3x3 grid (harder)
+
+- `image_dataset`: Dataset for image challenges
+    - `"ai_dogs"`: AI-generated dog images
+    - `"animals"`: Various animal images
+    - `"characters"`: Character/letter recognition
+    - `"keys"`: Key/lock matching
+
+- `audio_dataset`: Enable audio accessibility challenges
+    - `None`: Disabled (default)
+    - `"characters"`: Audio character recognition in multiple languages
+
+- `retrys`: Number of failed attempts before temporary block (default: 3)
+
+- `hardness`: Challenge difficulty level (1-5)
+    - `1`: Easy - minimal distortion
+    - `3`: Medium - moderate distortion
+    - `5`: Hard - maximum distortion
+
+- `behind_proxy`: Enable when behind reverse proxy/load balancer
+    - Automatically configures ProxyFix for correct IP detection
+
+- `use_client_id`: Use secure client IDs instead of IP addresses
+    - Better for privacy and shared IP scenarios
+    - Stored in secure HTTP-only cookies
 
 ## Additional Features
 
@@ -274,21 +399,60 @@ The error handler:
 - Provides appropriate error messages and descriptions
 - Includes HTTP status codes and titles
 
-### Complete Example
+## Bot Detection Features
+
+Flask-Humanify automatically detects various types of suspicious traffic:
+
+- **VPN Detection**: Identifies traffic from major VPN providers (NordVPN, ProtonVPN, ExpressVPN, etc.)
+- **Proxy Detection**: Detects proxy servers and anonymizers
+- **Datacenter IPs**: Flags requests from datacenter IP ranges
+- **Tor Exit Nodes**: Identifies Tor network exit points
+- **Web Crawlers**: Recognizes legitimate and malicious crawlers via user-agent analysis
+- **Forum Spammers**: Blocks known spam sources from StopForumSpam database
+- **Firehol Blocklists**: Uses Firehol Level 1 blocklist for known malicious IPs
+
+All detection happens automatically with no additional configuration required.
+
+## Complete Example
 
 Here's a complete example combining all features:
 
 ```python
 from flask import Flask
-from flask_humanify import Humanify, RateLimiter, ErrorHandler
+from flask_humanify import (
+    Humanify,
+    RateLimiter,
+    ErrorHandler,
+    require_human,
+    always_challenge,
+    block_bots,
+    exempt_from_protection,
+)
 
 app = Flask(__name__)
-# Setup core protection
-humanify = Humanify(app, challenge_type="one_click", image_dataset="animals")
-humanify.register_middleware(action="challenge")
+
+# Setup core protection with custom configuration
+humanify = Humanify(
+    app,
+    challenge_type="one_click",
+    image_dataset="animals",
+    audio_dataset="characters",  # Enable audio accessibility
+    retrys=3,
+    hardness=2,
+    behind_proxy=True,
+    use_client_id=True
+)
+
+# Protect all API routes with middleware
+humanify.register_middleware(
+    action="challenge",
+    url_patterns="/api/*",
+    exclude_patterns="/api/public/*"
+)
 
 # Add rate limiting
-rate_limiter = RateLimiter(app, max_requests=15, time_window=60)
+rate_limiter = RateLimiter(app, default_limit="100/hour")
+rate_limiter.set_route_limit("/api/data", "10/minute")
 
 # Add error handling
 error_handler = ErrorHandler(app)
@@ -297,6 +461,40 @@ error_handler = ErrorHandler(app)
 def index():
     return "Hello, Human!"
 
+@app.route("/api/public/status")
+@exempt_from_protection
+def public_status():
+    return {"status": "ok"}
+
+@app.route("/login")
+@always_challenge
+def login():
+    return "Login page - everyone must solve captcha"
+
+@app.route("/admin")
+@block_bots
+def admin():
+    return "Admin area - bots blocked immediately"
+
+@app.route("/protected")
+@require_human(action="challenge")
+def protected():
+    return "Protected content"
+
 if __name__ == "__main__":
     app.run(debug=True)
 ```
+
+## Security Best Practices
+
+- **Use HTTPS**: Always enable HTTPS in production for secure cookie transmission
+- **Behind Proxy**: Set `behind_proxy=True` when using reverse proxies or load balancers
+- **Client IDs**: Consider `use_client_id=True` for better privacy and shared IP handling
+- **Rate Limiting**: Combine bot protection with rate limiting for comprehensive defense
+- **Retry Limits**: Adjust `retrys` based on your security requirements (lower = stricter)
+- **Challenge Difficulty**: Balance `hardness` between security and user experience
+- **Pattern Matching**: Use specific patterns in middleware to protect only necessary routes
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.

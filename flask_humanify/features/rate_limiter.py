@@ -1,31 +1,26 @@
-import time
 import os
-from collections import defaultdict, deque
-from typing import Optional, Dict, Union, Tuple
+import re
+import time
+from collections import deque
 from functools import wraps
+
+from flask import Blueprint, Flask, g, redirect, render_template, request, url_for
+from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.wrappers import Response
+
+import hashlib
+import hmac
 import re
 
-from werkzeug.wrappers import Response
-from werkzeug.middleware.proxy_fix import ProxyFix
-from flask import Flask, Blueprint, request, redirect, url_for, render_template, g
 from flask_humanify.memory_server import MemoryClient, ensure_server_running
 from flask_humanify.utils import (
-    is_valid_routable_ip,
     get_or_create_client_id,
-    get_return_url,
+    get_next_url,
+    is_valid_routable_ip,
 )
 
 
-def parse_limit_string(limit_string: str) -> Tuple[int, int]:
-    """
-    Parse a limit string like "10/minute", "5 per hour", "100/day" into (count, seconds).
-
-    Args:
-        limit_string: String describing the rate limit
-
-    Returns:
-        Tuple of (max_requests, time_window_seconds)
-    """
+def parse_limit_string(limit_string):
     limit_string = limit_string.strip().lower()
 
     patterns = [
@@ -67,31 +62,41 @@ def parse_limit_string(limit_string: str) -> Tuple[int, int]:
     raise ValueError(f"Invalid limit string format: {limit_string}")
 
 
+def validate_regex_complexity(pattern: str, max_length: int = 200) -> bool:
+    if len(pattern) > max_length:
+        return False
+
+    repetition_count = pattern.count("*") + pattern.count("+") + pattern.count("{")
+    if repetition_count > 10:
+        return False
+
+    nested_groups = 0
+    max_nesting = 3
+    for char in pattern:
+        if char == "(":
+            nested_groups += 1
+            if nested_groups > max_nesting:
+                return False
+        elif char == ")":
+            nested_groups = max(0, nested_groups - 1)
+
+    return True
+
+
 class RateLimiter:
-    """
-    Rate limiter with per-route control capabilities.
-    """
+    MAX_CLIENTS = 5000
+    MAX_ROUTES_PER_CLIENT = 50
+    MEMORY_PRESSURE_THRESHOLD = 0.8
 
     def __init__(
         self,
         app=None,
-        max_requests: int = 10,
-        time_window: int = 10,
-        behind_proxy: bool = True,
-        use_client_id: Optional[bool] = None,
-        default_limit: Optional[str] = None,
-    ) -> None:
-        """
-        Initialize the rate limiter.
-
-        Args:
-            app: Flask application instance
-            max_requests: Default maximum requests (deprecated, use default_limit)
-            time_window: Default time window in seconds (deprecated, use default_limit)
-            behind_proxy: Whether the app is behind a proxy
-            use_client_id: Whether to use client ID for tracking
-            default_limit: Default rate limit string (e.g., "10/minute")
-        """
+        max_requests=10,
+        time_window=10,
+        behind_proxy=False,
+        use_client_id=None,
+        default_limit=None,
+    ):
         self.app = app
         self.behind_proxy = behind_proxy
         self.use_client_id = use_client_id
@@ -103,24 +108,55 @@ class RateLimiter:
             self.max_requests = max_requests
             self.time_window = time_window
 
-        self.ip_request_times = defaultdict(lambda: defaultdict(deque))
-        self.route_limits: Dict[str, Tuple[int, int]] = {}
-        self.route_patterns: Dict[str, Tuple[int, int]] = {}
+        self.ip_request_times = {}
+        self.client_access_order = deque()
+        self.route_limits = {}
+        self.route_patterns = {}
+        self._memory_check_counter = 0
 
         if app is not None:
             self.init_app(app)
 
-    def init_app(self, app: Flask) -> None:
-        """
-        Initialize the rate limiter.
-        """
+    def _check_memory_pressure(self) -> bool:
+        self._memory_check_counter += 1
+        if self._memory_check_counter % 100 != 0:
+            return False
+
+        current_clients = len(self.ip_request_times)
+        total_routes = sum(len(routes) for routes in self.ip_request_times.values())
+
+        client_pressure = current_clients / self.MAX_CLIENTS
+        route_pressure = total_routes / (self.MAX_CLIENTS * self.MAX_ROUTES_PER_CLIENT)
+
+        return max(client_pressure, route_pressure) > self.MEMORY_PRESSURE_THRESHOLD
+
+    def _aggressive_cleanup(self):
+        if not self._check_memory_pressure():
+            return
+
+        clients_to_remove = max(1, len(self.ip_request_times) // 10)
+
+        for _ in range(clients_to_remove):
+            if self.client_access_order:
+                oldest_client = self.client_access_order.popleft()
+                if oldest_client in self.ip_request_times:
+                    del self.ip_request_times[oldest_client]
+
+    def init_app(self, app):
         self.app = app
         if not isinstance(app.wsgi_app, ProxyFix) and self.behind_proxy:
             app.wsgi_app = ProxyFix(
-                app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1
+                app.wsgi_app,
+                x_for=1,
+                x_proto=1,
+                x_host=1,
+                x_port=1,
             )
 
-        humanify_use_client_id = app.config.get("HUMANIFY_USE_CLIENT_ID", False)
+        humanify_use_client_id = app.config.get(
+            "HUMANIFY_USE_CLIENT_ID",
+            False,
+        )
         if self.use_client_id is None:
             self.use_client_id = humanify_use_client_id
 
@@ -140,16 +176,19 @@ class RateLimiter:
 
                 @self.app.after_request
                 def after_request(response):
-                    """
-                    After request hook to set client ID cookie if needed.
-                    """
                     if hasattr(g, "humanify_new_client_id"):
+                        is_secure = (
+                            request.is_secure
+                            or request.headers.get("X-Forwarded-Proto", "") == "https"
+                        )
+
                         response.set_cookie(
                             "client_id",
                             g.humanify_new_client_id,
-                            max_age=14400,
+                            max_age=7200,
                             httponly=True,
                             samesite="Strict",
+                            secure=is_secure,
                         )
                     return response
 
@@ -157,21 +196,19 @@ class RateLimiter:
 
         if "humanify" not in self.app.blueprints:
             template_dir = os.path.join(
-                os.path.dirname(os.path.dirname(__file__)), "templates"
+                os.path.dirname(os.path.dirname(__file__)),
+                "templates",
             )
             rate_limiter_bp = Blueprint(
-                "humanify", __name__, template_folder=template_dir
+                "humanify",
+                __name__,
+                template_folder=template_dir,
             )
 
             @rate_limiter_bp.route("/rate_limited", methods=["GET"])
             def rate_limited():
-                """
-                Rate limited route.
-                """
                 return (
-                    render_template("rate_limited.html").replace(
-                        "RETURN_URL", get_return_url(request)
-                    ),
+                    render_template("rate_limited.html", next=get_next_url(request)),
                     429,
                     {"Cache-Control": "public, max-age=15552000"},
                 )
@@ -185,42 +222,28 @@ class RateLimiter:
                 endpoint="humanify.rate_limited",
             )
             def rate_limited():
-                """
-                Rate limited route.
-                """
                 return (
-                    render_template("rate_limited.html").replace(
-                        "RETURN_URL", get_return_url(request)
-                    ),
+                    render_template("rate_limited.html", next=get_next_url(request)),
                     429,
                     {"Cache-Control": "public, max-age=15552000"},
                 )
 
-    def limit(self, limit_string: str):
-        """
-        Decorator to apply rate limiting to specific routes.
-
-        Args:
-            limit_string: Rate limit string (e.g., "5/minute", "10 per hour")
-
-        Usage:
-            @app.route('/api/data')
-            @limiter.limit("10/minute")
-            def get_data():
-                return "data"
-        """
-
+    def limit(self, limit_string):
         def decorator(f):
             max_requests, time_window = parse_limit_string(limit_string)
 
             @wraps(f)
             def decorated_function(*args, **kwargs):
                 route_key = f"{request.endpoint}:{request.method}"
-                if self.is_rate_limited_for_route(route_key, max_requests, time_window):
+                if self.is_rate_limited_for_route(
+                    route_key,
+                    max_requests,
+                    time_window,
+                ):
                     return redirect(
                         url_for(
                             "humanify.rate_limited",
-                            return_url=request.full_path.rstrip("?"),
+                            next=request.full_path.rstrip("?"),
                         )
                     )
                 return f(*args, **kwargs)
@@ -229,14 +252,7 @@ class RateLimiter:
 
         return decorator
 
-    def set_route_limit(self, route_pattern: str, limit_string: str) -> None:
-        """
-        Set rate limit for a specific route pattern.
-
-        Args:
-            route_pattern: Route pattern (e.g., "/api/*", "/users/<int:id>")
-            limit_string: Rate limit string (e.g., "10/minute")
-        """
+    def set_route_limit(self, route_pattern, limit_string):
         if (
             route_pattern.startswith("/humanify/rate_limited")
             or route_pattern == "/humanify/*"
@@ -247,16 +263,6 @@ class RateLimiter:
         self.route_patterns[route_pattern] = (max_requests, time_window)
 
     def exempt(self, f):
-        """
-        Decorator to exempt a route from rate limiting.
-
-        Usage:
-            @app.route('/health')
-            @limiter.exempt
-            def health_check():
-                return "OK"
-        """
-
         @wraps(f)
         def decorated_function(*args, **kwargs):
             g.humanify_rate_limit_exempt = True
@@ -265,8 +271,7 @@ class RateLimiter:
         return decorated_function
 
     @property
-    def _client_ip(self) -> Optional[str]:
-        """Get the client IP address."""
+    def _client_ip(self):
         if hasattr(g, "humanify_client_ip"):
             return g.humanify_client_ip
 
@@ -278,18 +283,7 @@ class RateLimiter:
         g.humanify_client_ip = client_ip
         return client_ip
 
-    def get_route_limit(self, endpoint: str, method: str, path: str) -> Tuple[int, int]:
-        """
-        Get the rate limit for a specific route.
-
-        Args:
-            endpoint: Flask endpoint name
-            method: HTTP method
-            path: Request path
-
-        Returns:
-            Tuple of (max_requests, time_window)
-        """
+    def get_route_limit(self, endpoint, method, path):
         route_key = f"{endpoint}:{method}"
 
         if route_key in self.route_limits:
@@ -301,28 +295,24 @@ class RateLimiter:
 
         return self.max_requests, self.time_window
 
-    def _match_route_pattern(self, path: str, pattern: str) -> bool:
-        """
-        Check if a path matches a route pattern.
+    def _match_route_pattern(self, path, pattern):
+        if not validate_regex_complexity(pattern):
+            return False
 
-        Args:
-            path: Request path
-            pattern: Pattern to match against
-
-        Returns:
-            True if the path matches the pattern
-        """
         pattern = pattern.replace("*", ".*")
         pattern = re.sub(r"<[^>]+>", "[^/]+", pattern)
         pattern = f"^{pattern}$"
 
-        return bool(re.match(pattern, path))
+        try:
+            return bool(re.match(pattern, path))
+        except re.error:
+            return False
 
-    def before_request(self) -> Optional[Response]:
-        """
-        Before request hook.
-        """
-        if request.endpoint in ["humanify.rate_limited", "humanify.access_denied"]:
+    def before_request(self):
+        if request.endpoint in [
+            "humanify.rate_limited",
+            "humanify.access_denied",
+        ]:
             return
 
         if hasattr(g, "humanify_rate_limit_exempt"):
@@ -331,43 +321,50 @@ class RateLimiter:
         if self.is_rate_limited():
             return redirect(
                 url_for(
-                    "humanify.rate_limited", return_url=request.full_path.rstrip("?")
+                    "humanify.rate_limited",
+                    next=request.full_path.rstrip("?"),
                 )
             )
 
-    def is_rate_limited(self, ip: Optional[str] = None) -> bool:
-        """
-        Check if the IP is rate limited for the current route.
-        """
+    def is_rate_limited(self, ip=None):
         if not request.endpoint:
             return False
 
         max_requests, time_window = self.get_route_limit(
-            request.endpoint, request.method, request.path
+            request.endpoint,
+            request.method,
+            request.path,
         )
 
         route_key = f"{request.endpoint}:{request.method}"
-        return self.is_rate_limited_for_route(route_key, max_requests, time_window, ip)
+        return self.is_rate_limited_for_route(
+            route_key,
+            max_requests,
+            time_window,
+            ip,
+        )
+
+    def _evict_oldest_client(self):
+        if not self.client_access_order:
+            return
+
+        oldest_client = self.client_access_order.popleft()
+        if oldest_client in self.ip_request_times:
+            del self.ip_request_times[oldest_client]
+
+    def _cleanup_expired_requests(self, request_times, current_time, time_window):
+        while request_times and request_times[0] <= current_time - time_window:
+            request_times.popleft()
 
     def is_rate_limited_for_route(
         self,
-        route_key: str,
-        max_requests: int,
-        time_window: int,
-        ip: Optional[str] = None,
-    ) -> bool:
-        """
-        Check if the IP is rate limited for a specific route.
+        route_key,
+        max_requests,
+        time_window,
+        ip=None,
+    ):
+        self._aggressive_cleanup()
 
-        Args:
-            route_key: Unique key for the route
-            max_requests: Maximum requests allowed
-            time_window: Time window in seconds
-            ip: IP address to check (optional)
-
-        Returns:
-            True if rate limited, False otherwise
-        """
         client_id_secret_key = None
         if isinstance(self._client_id_secret_key, bytes):
             client_id_secret_key = self._client_id_secret_key
@@ -380,10 +377,26 @@ class RateLimiter:
         )
 
         current_time = time.time()
-        request_times = self.ip_request_times[client_id][route_key]
 
-        while request_times and request_times[0] <= current_time - time_window:
-            request_times.popleft()
+        if len(self.ip_request_times) >= self.MAX_CLIENTS:
+            self._evict_oldest_client()
+
+        if client_id not in self.ip_request_times:
+            self.ip_request_times[client_id] = {}
+            self.client_access_order.append(client_id)
+
+        client_routes = self.ip_request_times[client_id]
+
+        if len(client_routes) >= self.MAX_ROUTES_PER_CLIENT:
+            oldest_route = next(iter(client_routes))
+            del client_routes[oldest_route]
+
+        if route_key not in client_routes:
+            client_routes[route_key] = deque()
+
+        request_times = client_routes[route_key]
+
+        self._cleanup_expired_requests(request_times, current_time, time_window)
 
         if len(request_times) < max_requests:
             request_times.append(current_time)
@@ -391,43 +404,25 @@ class RateLimiter:
 
         return True
 
-    def reset_client(self, client_id: str, route_key: Optional[str] = None) -> None:
-        """
-        Reset rate limiting for a specific client.
-
-        Args:
-            client_id: Client identifier
-            route_key: Specific route to reset (optional, resets all if None)
-        """
+    def reset_client(self, client_id, route_key=None):
         if client_id in self.ip_request_times:
             if route_key:
                 if route_key in self.ip_request_times[client_id]:
                     self.ip_request_times[client_id][route_key].clear()
             else:
                 del self.ip_request_times[client_id]
+                if client_id in self.client_access_order:
+                    self.client_access_order.remove(client_id)
 
-    def get_client_stats(
-        self, client_id: str
-    ) -> Dict[str, Dict[str, Union[int, float]]]:
-        """
-        Get statistics for a specific client.
-
-        Args:
-            client_id: Client identifier
-
-        Returns:
-            Dictionary with route statistics
-        """
+    def get_client_stats(self, client_id):
         stats = {}
         current_time = time.time()
 
         if client_id in self.ip_request_times:
             for route_key, request_times in self.ip_request_times[client_id].items():
-                while (
-                    request_times
-                    and request_times[0] <= current_time - self.time_window
-                ):
-                    request_times.popleft()
+                self._cleanup_expired_requests(
+                    request_times, current_time, self.time_window
+                )
 
                 stats[route_key] = {
                     "current_requests": len(request_times),
