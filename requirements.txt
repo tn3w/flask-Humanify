@@ -6,3 +6,4 @@ cryptography
 scipy
 pydub
 crawler-user-agents
+audioop-lts>=0.2.1;python_version>='3.13'
