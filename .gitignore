@@ -169,3 +169,4 @@ dist/
 flask_humanify/secret_key.bin
 
 test*.py
+app.py
