@@ -1,3 +1,9 @@
+> [!TIP]
+> Want more challenge types, better performance, a cleaner API, and active feature development? Use **[flask-Vouch](https://github.com/tn3w/flask-Vouch)**, the successor to this project. flask-Humanify receives security fixes only.
+> ```bash
+> pip install flask-Vouch
+> ```
+
 <h1 align="center">flask-Humanify</h1>
 <p align="center">A strong bot protection system for Flask with many features: rate limiting, special rules for users, web crawler detection, and automatic bot detection.</p>
 <p align="center"><a rel="noreferrer noopener" href="https://github.com/tn3w/flask-Humanify"><img alt="Github" src="https://img.shields.io/badge/Github-141e24.svg?&style=for-the-badge&logo=github&logoColor=white"></a>  <a rel="noreferrer noopener" href="https://pypi.org/project/flask-Humanify/"><img alt="PyPI" src="https://img.shields.io/badge/PyPi-141e24.svg?&style=for-the-badge&logo=python&logoColor=white"></a>  <a rel="noreferrer noopener" href="https://libraries.io/pypi/flask-Humanify"><img alt="Libraries.io" src="https://img.shields.io/badge/Libraries.io-141e24.svg?&style=for-the-badge&logo=npm&logoColor=white"></a></p>
